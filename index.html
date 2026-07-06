@@ -43,9 +43,11 @@
     justify-content: space-between;
     padding: 6px 4px 12px;
   }
-  header h1 { font-size: 20px; font-weight: 800; letter-spacing: 0.06em; }
-  header h1 span { color: var(--accent); margin-left: 0.5em; }
-  header .sub { font-size: 12px; color: var(--ink-dim); letter-spacing: 0.12em; }
+  header h1 { font-size: 20px; font-weight: 800; letter-spacing: 0.06em; display: flex; align-items: center; gap: 9px; }
+  .taegeuk { width: 21px; height: 21px; display: block; animation: spin 5s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .taegeuk { animation: none; } }
+  .brand-en { font-size: 18px; font-weight: 800; color: var(--accent); letter-spacing: 0.04em; }
 
   .status {
     width: 100%;
@@ -147,8 +149,13 @@
 <body>
 
 <header>
-  <h1>아홉 <span>9_Square</span></h1>
-  <div class="sub">아홉 줄 바둑</div>
+  <h1>아홉
+    <svg class="taegeuk" viewBox="0 0 100 100" aria-hidden="true">
+      <circle cx="50" cy="50" r="48" fill="#3a66c4"/>
+      <path d="M50 2 a48 48 0 0 1 0 96 a24 24 0 0 1 0 -48 a24 24 0 0 0 0 -48 z" fill="#c94b3b"/>
+    </svg>
+  </h1>
+  <div class="brand-en">9_Square</div>
 </header>
 
 <div class="status">
@@ -855,8 +862,12 @@ function playPassSound() {
   } catch (e) { /* */ }
 }
 
-// 모바일 브라우저는 첫 터치 후에만 소리를 허용하므로 미리 준비
-document.addEventListener('pointerdown', initSound, { once: true });
+// 페이지가 열리자마자 소리를 미리 해독해 둔다 → 첫 수부터 소리가 남
+initSound();
+// 모바일 브라우저는 사용자의 첫 터치 후에만 재생을 허용하므로, 첫 터치에서 오디오를 깨움
+document.addEventListener('pointerdown', () => {
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}, { once: true });
 
 // ---------- 시작 ----------
 document.getElementById('btnUndo').addEventListener('click', undo);
