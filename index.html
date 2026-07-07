@@ -4,7 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>아홉 · 9_Square — 9줄 바둑</title>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.21.0/dist/tf.min.js"></script>
+<meta name="theme-color" content="#1c2622">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="9_Square">
 <style>
   :root {
     --bg: #1c2622;
@@ -1290,149 +1295,6 @@ async function evalMoves(cands, nEach, enemy) {
   }
 }
 
-/* ============================================================
-   AI 고수 — KataGo 신경망 (TensorFlow.js)
-   maksimKorzh/go 프로젝트의 6블록 kyu 신경망(약 4MB, OGS 5급).
-   원본 KataGo by Lightvector, tfjs 변환 by Yuji Ichikawa.
-   검색(MCTS) 없이 신경망의 착점 직관만 사용 → 한 수 1초 이내.
-   9x9 국면을 19x19 텐서의 좌상단에 놓고 마스크로 판 크기를 알린다.
-   ============================================================ */
-let kataModel = null;       // 로드된 신경망 (한 번만 로드)
-let kataLoading = null;     // 로딩 프라미스 (중복 로드 방지)
-let kataFailed = false;     // 로드 실패 시 몬테카를로로 대체
-
-async function loadKata() {
-  if (kataModel) return kataModel;
-  if (kataLoading) return kataLoading;
-  kataLoading = (async () => {
-    try {
-      if (typeof tf === 'undefined') throw new Error('tf 없음');
-      try { await tf.setBackend('webgl'); } catch (e) {}
-      if (tf.getBackend() !== 'webgl') { try { await tf.setBackend('cpu'); } catch (e) {} }
-      kataModel = await tf.loadGraphModel('model/dan/model.json');
-      // 예열: 첫 추론이 느리므로 미리 한 번 돌려둔다
-      const warmBin = tf.zeros([1, 361, 22]);
-      const warmGlob = tf.zeros([1, 19]);
-      const r = await kataModel.executeAsync({
-        'swa_model/bin_inputs': warmBin, 'swa_model/global_inputs': warmGlob
-      });
-      (Array.isArray(r) ? r : [r]).forEach(t => t.dispose());
-      warmBin.dispose(); warmGlob.dispose();
-      return kataModel;
-    } catch (e) {
-      kataFailed = true;
-      return null;
-    }
-  })();
-  return kataLoading;
-}
-
-function softmaxArr(a) {
-  const m = Math.max(...a);
-  const e = a.map(v => Math.exp(v - m));
-  const s = e.reduce((p, c) => p + c, 0) || 1;
-  return e.map(v => v / s);
-}
-
-// 신경망 1회 평가 → {polRaw(361), value(-1~1, side 관점)}, 캐시 사용
-const nnCache = new Map();
-async function kataEval(bd, side) {
-  const key = side + boardStringOf(bd);
-  if (nnCache.has(key)) return nnCache.get(key);
-  const model = await loadKata();
-  if (!model) return null;
-  const { bin, glob } = kataInputOf(bd, side);
-  const binT = tf.tensor(bin, [1, 361, 22], 'float32');
-  const globT = tf.tensor(glob, [1, 19], 'float32');
-  let results;
-  try {
-    results = await model.executeAsync({
-      'swa_model/bin_inputs': binT, 'swa_model/global_inputs': globT
-    });
-  } finally { binT.dispose(); globT.dispose(); }
-  results = Array.isArray(results) ? results : [results];
-  let polT = null, valT = null;
-  for (const r of results) {
-    const last = r.shape[r.shape.length - 1];
-    if (last === 362) polT = r;
-    if (last === 3) valT = r;
-  }
-  const polRaw = Array.from(await polT.data()).slice(0, 361);
-  const valRaw = Array.from(await valT.data());
-  results.forEach(r => r.dispose());
-  const vs = softmaxArr(valRaw);          // [승, 무, 패]
-  const value = vs[0] - vs[2];            // side 관점 기대값
-  const out = { polRaw, value };
-  if (nnCache.size > 4000) nnCache.clear();
-  nnCache.set(key, out);
-  return out;
-}
-
-// 임의 보드용 입력 인코딩 (kataInput은 전역 board 전용이므로 별도 버전)
-function kataInputOf(bd, side) {
-  const CH = 22, GL = 19;
-  const bin = new Float32Array(361 * CH);
-  const glob = new Float32Array(GL);
-  const me = side, opp = 3 - side;
-  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
-    const sq = 19 * y + x;
-    bin[CH * sq + 0] = 1.0;
-    if (bd[y][x] === me) bin[CH * sq + 1] = 1.0;
-    if (bd[y][x] === opp) bin[CH * sq + 2] = 1.0;
-    if (bd[y][x] !== EMPTY) {
-      const L = libCountOf(bd, x, y);
-      if (L === 1) bin[CH * sq + 3] = 1.0;
-      if (L === 2) bin[CH * sq + 4] = 1.0;
-      if (L === 3) bin[CH * sq + 5] = 1.0;
-    }
-  }
-  const selfKomi = side === WHITE ? KOMI : -KOMI;
-  glob[5] = selfKomi / 20.0;
-  return { bin, glob };
-}
-function libCountOf(bd, x, y) {
-  const color = bd[y][x];
-  const seen = new Set(), libs = new Set(), st = [[x, y]];
-  while (st.length) {
-    const [cx, cy] = st.pop(); const k = cx * 16 + cy;
-    if (seen.has(k)) continue; seen.add(k);
-    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-      const nx = cx + dx, ny = cy + dy;
-      if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
-      if (bd[ny][nx] === EMPTY) libs.add(nx * 16 + ny);
-      else if (bd[ny][nx] === color) st.push([nx, ny]);
-    }
-  }
-  return libs.size;
-}
-function boardStringOf(bd) { return bd.map(r => r.join('')).join(''); }
-
-// AI 고수: dan 신경망 정책을 그대로 따른다.
-// (AI끼리 대국 실측 결과, 순수 정책이 전술 보너스나 MCTS보다 확실히 강했다.
-//  이 신경망은 그 자체로 충분히 세므로 인위적 개입은 오히려 실력을 떨어뜨린다.)
-async function kataMctsMove(side, budgetMs) {
-  const ev = await kataEval(board, side);
-  if (!ev) return undefined;                 // 로드 실패 → 호출부가 대체
-
-  // 신경망 정책 점수가 높은 순으로 합법수를 찾아 둔다
-  const order = [];
-  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
-    order.push([ev.polRaw[19 * y + x], x, y]);
-  }
-  order.sort((a, b) => b[0] - a[0]);
-
-  for (const [, x, y] of order) {
-    if (board[y][x] !== EMPTY) continue;
-    if (isOwnEye(board, x, y, side)) continue;      // 자기 눈은 안 메움
-    const test = board.map(r => r.slice());
-    if (!tryPlayFast(test, x, y, side, null)) continue;   // 자살수 등
-    const s = boardStringOf(test);
-    if (positions.length >= 2 && s === positions[positions.length - 2]) continue; // 패
-    return { x, y };
-  }
-  return null;                                       // 둘 곳 없음 → 패스
-}
-
 function maybeScheduleAI() {
   if (gameMode !== 'ai' || gameOver || fixing) return;
   if (turn !== aiColor || aiThinking) return;
@@ -1481,86 +1343,6 @@ async function aiMove() {
     showToast('AI 서버에 연결할 수 없습니다. 노트북 서버와 Tailscale을 확인하세요');
     return;
   }
-}
-
-// (아래는 예전 로컬 AI 코드 — 서버 방식에서는 안 쓰지만 남겨둠)
-async function aiMove_local_unused() {
-  if (gameOver || aiThinking || turn !== aiColor) return;
-  aiThinking = true;
-  updateStatus();
-  await tick();
-
-  const enemy = aiColor === BLACK ? WHITE : BLACK;
-
-  // ----- AI 고수 (aiLevel 3): dan 신경망 + MCTS 탐색 -----
-  if (aiLevel === 3) {
-    const model = await loadKata();
-    if (model) {
-      const mv = await kataMctsMove(aiColor, 8000);   // 최대 8초 탐색
-      aiLowStreak = 0;                                 // 고수는 끝까지 둠
-      aiThinking = false;
-      if (mv === null) { aiActing = true; pass(); aiActing = false; }
-      else { aiActing = true; tryMove(mv.x, mv.y); aiActing = false; }
-      return;
-    }
-    // 로드 실패 → 아래 몬테카를로로 안전 대체
-  }
-
-  const mult = [0.4, 1, 2.2][Math.min(aiLevel, 2)];
-
-  // 상대가 방금 한 수 쉬었다면: 이기고 있는지 가늠해서 이기고 있으면 같이 쉼 → 계가
-  if (passCount === 1) {
-    let winCount = 0;
-    const N = 50;
-    for (let p = 0; p < N; p++) {
-      const fin = playout(board, aiColor);
-      const diff = areaScoreDiff(fin);
-      if (aiColor === BLACK ? diff > 0 : diff < 0) winCount++;
-      if (p % 25 === 24) await tick();
-    }
-    if (winCount / N >= 0.5) {
-      aiThinking = false;
-      aiActing = true; pass(); aiActing = false;
-      return;
-    }
-  }
-
-  let cands = legalAIMoves(aiColor);
-  if (!cands.length) {
-    aiThinking = false;
-    aiActing = true; pass(); aiActing = false;
-    return;
-  }
-
-  // 1라운드: 모든 후보를 얕게
-  await evalMoves(cands, Math.max(2, Math.round(6 * mult)), enemy);
-  cands.sort((a, b) => moveRate(b) - moveRate(a));
-  const tact1 = cands.filter(m => m.bonus > 0);
-  cands = [...new Set([...cands.slice(0, 12), ...tact1.slice(0, 6)])];
-  // 2라운드: 상위 12개만 더
-  await evalMoves(cands, Math.max(4, Math.round(18 * mult)), enemy);
-  cands.sort((a, b) => moveRate(b) - moveRate(a));
-  const tact2 = cands.filter(m => m.bonus > 0);
-  cands = [...new Set([...cands.slice(0, 5), ...tact2.slice(0, 3)])];
-  // 3라운드: 상위 5개를 깊게
-  await evalMoves(cands, Math.max(8, Math.round(56 * mult)), enemy);
-  cands.sort((a, b) => moveRate(b) - moveRate(a));
-
-  let choice = cands[0];
-  // 순한 상대: 가끔 최선이 아닌 수를 둠
-  if (aiLevel === 0 && cands.length > 2 && Math.random() < 0.5) {
-    choice = cands[Math.floor(Math.random() * 3)];
-  }
-
-  const wr = choice.wins / choice.visits;   // 불계 판단은 순수 승률로
-  if (wr < 0.05) aiLowStreak++; else aiLowStreak = 0;
-
-  aiThinking = false;
-  if (aiLowStreak >= 2) { aiResign(); return; }
-
-  aiActing = true;
-  tryMove(choice.x, choice.y);
-  aiActing = false;
 }
 
 // AI가 돌을 던짐 (불계)
