@@ -510,12 +510,72 @@ function requestScoring() {
   if (board.flat().every(v => v === EMPTY)) { showToast('아직 둔 수가 없습니다'); return; }
   clearTimeout(aiTimer);
   gameOver = true;
+  // AI 대국이면 서버의 KataGo에게 정확한 계가를 맡긴다 (몬테카를로 오판 방지)
+  if (gameMode === 'ai') {
+    scoreByServer();
+    return;
+  }
   showToast('죽은 돌을 판정하는 중...', 3000);
-  // 토스트가 화면에 먼저 그려지도록 잠깐 양보한 뒤 계산 시작
   setTimeout(() => {
     autoDetectDead();
     calculateScore();
   }, 50);
+}
+
+// KataGo 서버에게 최종 점수를 물어 결과 카드를 띄운다
+async function scoreByServer() {
+  showToast('KataGo가 계가하는 중...', 3000);
+  try {
+    const res = await fetch(KATAGO_SERVER + '/score', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ moves: gtpMoves, boardsize: SIZE, komi: KOMI }),
+    });
+    if (!res.ok) throw new Error('서버 오류 ' + res.status);
+    const data = await res.json();
+    const s = data.score;                 // 예: "B+2.5", "W+3.5", "0" (무승부)
+    if (!s) throw new Error('점수 없음');
+    showServerResult(s);
+  } catch (e) {
+    // 서버 실패 시 기존 방식으로 대체
+    showToast('서버 계가 실패 — 자체 계가로 판정합니다', 2500);
+    setTimeout(() => { autoDetectDead(); calculateScore(); }, 50);
+  }
+}
+
+// "B+2.5" 같은 KataGo 결과를 결과 카드로 표시
+function showServerResult(scoreStr) {
+  let winner = '', diff = '';
+  const str = String(scoreStr).trim();
+  if (str === '0' || str.toUpperCase() === 'DRAW') {
+    winner = null;
+  } else {
+    const side = str[0].toUpperCase();
+    winner = side === 'B' ? '흑' : side === 'W' ? '백' : null;
+    diff = str.slice(2);                  // "B+2.5" → "2.5"
+  }
+  const overlay = document.getElementById('resultOverlay');
+  overlay.className = 'result-overlay';
+  const title = winner
+    ? `<h2><span>${winner}</span> ${diff}집 승</h2>`
+    : `<h2>무승부</h2>`;
+  overlay.innerHTML = `
+    <div class="result-card">
+      ${title}
+      <div class="detail">KataGo가 정밀 계가한 결과입니다.</div>
+      <div class="btns" style="grid-template-columns:1fr 1fr">
+        <button id="btnBackS">계속 두기</button>
+        <button id="btnNewS" class="primary">새 대국</button>
+      </div>
+    </div>`;
+  document.getElementById('btnBackS').addEventListener('click', () => {
+    overlay.className = 'hidden'; overlay.innerHTML = '';
+    gameOver = false;
+  });
+  document.getElementById('btnNewS').addEventListener('click', () => {
+    overlay.className = 'hidden'; overlay.innerHTML = '';
+    showSetup();
+  });
 }
 
 /* ============================================================
