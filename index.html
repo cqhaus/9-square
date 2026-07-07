@@ -202,6 +202,7 @@
   <button id="btnPass">한 수 쉬기</button>
   <button id="btnScoreReq" class="primary">계가</button>
   <button id="btnNew">새 대국</button>
+  <button id="btnCopyRec" title="진단용 대국 기록 복사">기록</button>
 </div>
 
 <div class="controls hidden" id="fixControls">
@@ -251,6 +252,48 @@ function fromGtp(s) {
   const col = GTP_COLS.indexOf(s[0].toUpperCase());
   const row = parseInt(s.slice(1), 10);
   return { x: col, y: SIZE - row };
+}
+
+// 지금까지의 대국 기록을 진단용 텍스트로 만들어 클립보드에 복사
+function copyGameRecord() {
+  const record = {
+    보드크기: SIZE,
+    덤: KOMI,
+    치수: handicap,
+    내돌: (aiColor === BLACK ? '백' : '흑'),
+    착수기록: gtpMoves,
+  };
+  const text = '=== 아홉 9_Square 대국 기록 ===\n'
+    + JSON.stringify(record, null, 2)
+    + '\n=== 기록 끝 ===';
+  // 클립보드 복사 (실패 시 화면에 표시해서 수동 복사 가능하게)
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => showToast('대국 기록이 복사되었습니다. Claude에게 붙여넣으세요', 3000),
+      () => showRecordFallback(text)
+    );
+  } else {
+    showRecordFallback(text);
+  }
+}
+
+// 클립보드가 안 될 때: 화면에 텍스트를 띄워 길게 눌러 복사
+function showRecordFallback(text) {
+  const overlay = document.getElementById('resultOverlay');
+  overlay.className = 'result-overlay';
+  overlay.innerHTML = '<div class="result-card">'
+    + '<h2>대국 <span>기록</span></h2>'
+    + '<div class="detail">아래 내용을 길게 눌러 전체 선택·복사하세요.</div>'
+    + '<textarea readonly style="width:100%;height:160px;font-size:11px;'
+    + 'background:rgba(0,0,0,0.3);color:var(--ink);border:1px solid rgba(255,255,255,0.15);'
+    + 'border-radius:8px;padding:8px;box-sizing:border-box">'
+    + text.replace(/</g, '&lt;') + '</textarea>'
+    + '<button class="primary setup-start" id="btnRecClose">닫기</button></div>';
+  const ta = overlay.querySelector('textarea');
+  ta.focus(); ta.select();
+  document.getElementById('btnRecClose').addEventListener('click', () => {
+    overlay.className = 'hidden'; overlay.innerHTML = '';
+  });
 }
 let gameOver;
 let fixing;
@@ -563,11 +606,13 @@ function showServerResult(scoreStr) {
     <div class="result-card">
       ${title}
       <div class="detail">KataGo가 정밀 계가한 결과입니다.</div>
-      <div class="btns" style="grid-template-columns:1fr 1fr">
+      <div class="btns" style="grid-template-columns:1fr 1fr 1fr">
+        <button id="btnCopyS">기록 복사</button>
         <button id="btnBackS">계속 두기</button>
         <button id="btnNewS" class="primary">새 대국</button>
       </div>
     </div>`;
+  document.getElementById('btnCopyS').addEventListener('click', copyGameRecord);
   document.getElementById('btnBackS').addEventListener('click', () => {
     overlay.className = 'hidden'; overlay.innerHTML = '';
     gameOver = false;
@@ -1519,6 +1564,7 @@ function showSetup() {
 document.getElementById('btnUndo').addEventListener('click', undo);
 document.getElementById('btnPass').addEventListener('click', pass);
 document.getElementById('btnScoreReq').addEventListener('click', requestScoring);
+document.getElementById('btnCopyRec').addEventListener('click', copyGameRecord);
 document.getElementById('btnNew').addEventListener('click', () => {
   showSetup();
 });
