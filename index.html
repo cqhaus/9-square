@@ -154,7 +154,10 @@
   }
   .opt.sel { background: var(--accent); border-color: transparent; }
   .setup-start { margin-top: 20px; width: 100%; }
-  .opt-hint { font-size: 11px; color: var(--ink-dim); margin-top: 8px; line-height: 1.5; min-height: 2.6em; }
+  .opt-hint { font-size: 11px; color: var(--ink-dim); margin-top: 8px; line-height: 1.5; }
+  .stepper { display: flex; align-items: center; justify-content: center; gap: 16px; }
+  .step { width: 44px; height: 44px; border-radius: 12px; font-size: 22px; font-weight: 700; background: rgba(255,255,255,0.06); }
+  .stepval { min-width: 72px; text-align: center; font-size: 18px; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -228,7 +231,8 @@ const SIZE = 9;
 const MARGIN = 38;
 const SPACING_X = 48;
 const SPACING_Y = 52;
-const KOMI = 6.5;
+let KOMI = 6.5;              // 덤 (설정에서 바꿈)
+let handicap = 0;           // 치수 (접바둑 돌 수, 0=호선)
 const PLAYOUTS = 300;     // 무작위 마무리 판 수 (판정 정확도와 속도의 균형)
 const EMPTY = 0, BLACK = 1, WHITE = 2;
 
@@ -822,8 +826,23 @@ function newGame() {
   lastMove = null;
   deadStones = new Set();
   territoryMarks = [];
+  placeHandicap();       // 접바둑이면 흑 미리 배치
   setPlayerNames();
   renderStones();
+}
+
+// 접바둑: 9x9 표준 화점에 흑을 미리 놓고 백부터 두게 함
+function placeHandicap() {
+  if (!handicap || handicap < 2) return;
+  const pts = {
+    2: [[2,6],[6,2]],
+    3: [[2,6],[6,2],[6,6]],
+    4: [[2,2],[2,6],[6,2],[6,6]],
+    5: [[2,2],[2,6],[6,2],[6,6],[4,4]],
+  }[handicap] || [];
+  for (const [x, y] of pts) board[y][x] = BLACK;
+  turn = WHITE;                         // 흑이 미리 놓았으니 백부터
+  positions = [boardString(board)];
 }
 
 // ---------- 안내 메시지 ----------
@@ -1051,7 +1070,7 @@ async function loadKata() {
       if (typeof tf === 'undefined') throw new Error('tf 없음');
       try { await tf.setBackend('webgl'); } catch (e) {}
       if (tf.getBackend() !== 'webgl') { try { await tf.setBackend('cpu'); } catch (e) {} }
-      kataModel = await tf.loadGraphModel('model/kyu/model.json');
+      kataModel = await tf.loadGraphModel('model/dan/model.json');
       // 예열: 첫 추론이 느리므로 미리 한 번 돌려둔다
       const warmBin = tf.zeros([1, 361, 22]);
       const warmGlob = tf.zeros([1, 19]);
@@ -1069,8 +1088,70 @@ async function loadKata() {
   return kataLoading;
 }
 
-// 그룹의 활로 수 (신경망 입력용, board 전역 사용)
-function libCountAt(bd, x, y) {
+function softmaxArr(a) {
+  const m = Math.max(...a);
+  const e = a.map(v => Math.exp(v - m));
+  const s = e.reduce((p, c) => p + c, 0) || 1;
+  return e.map(v => v / s);
+}
+
+// 신경망 1회 평가 → {polRaw(361), value(-1~1, side 관점)}, 캐시 사용
+const nnCache = new Map();
+async function kataEval(bd, side) {
+  const key = side + boardStringOf(bd);
+  if (nnCache.has(key)) return nnCache.get(key);
+  const model = await loadKata();
+  if (!model) return null;
+  const { bin, glob } = kataInputOf(bd, side);
+  const binT = tf.tensor(bin, [1, 361, 22], 'float32');
+  const globT = tf.tensor(glob, [1, 19], 'float32');
+  let results;
+  try {
+    results = await model.executeAsync({
+      'swa_model/bin_inputs': binT, 'swa_model/global_inputs': globT
+    });
+  } finally { binT.dispose(); globT.dispose(); }
+  results = Array.isArray(results) ? results : [results];
+  let polT = null, valT = null;
+  for (const r of results) {
+    const last = r.shape[r.shape.length - 1];
+    if (last === 362) polT = r;
+    if (last === 3) valT = r;
+  }
+  const polRaw = Array.from(await polT.data()).slice(0, 361);
+  const valRaw = Array.from(await valT.data());
+  results.forEach(r => r.dispose());
+  const vs = softmaxArr(valRaw);          // [승, 무, 패]
+  const value = vs[0] - vs[2];            // side 관점 기대값
+  const out = { polRaw, value };
+  if (nnCache.size > 4000) nnCache.clear();
+  nnCache.set(key, out);
+  return out;
+}
+
+// 임의 보드용 입력 인코딩 (kataInput은 전역 board 전용이므로 별도 버전)
+function kataInputOf(bd, side) {
+  const CH = 22, GL = 19;
+  const bin = new Float32Array(361 * CH);
+  const glob = new Float32Array(GL);
+  const me = side, opp = 3 - side;
+  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+    const sq = 19 * y + x;
+    bin[CH * sq + 0] = 1.0;
+    if (bd[y][x] === me) bin[CH * sq + 1] = 1.0;
+    if (bd[y][x] === opp) bin[CH * sq + 2] = 1.0;
+    if (bd[y][x] !== EMPTY) {
+      const L = libCountOf(bd, x, y);
+      if (L === 1) bin[CH * sq + 3] = 1.0;
+      if (L === 2) bin[CH * sq + 4] = 1.0;
+      if (L === 3) bin[CH * sq + 5] = 1.0;
+    }
+  }
+  const selfKomi = side === WHITE ? KOMI : -KOMI;
+  glob[5] = selfKomi / 20.0;
+  return { bin, glob };
+}
+function libCountOf(bd, x, y) {
   const color = bd[y][x];
   const seen = new Set(), libs = new Set(), st = [[x, y]];
   while (st.length) {
@@ -1085,87 +1166,110 @@ function libCountAt(bd, x, y) {
   }
   return libs.size;
 }
+function boardStringOf(bd) { return bd.map(r => r.join('')).join(''); }
 
-// 최근 착수 좌표들을 최신순으로 (신경망 입력 채널 9~13용)
-function recentMoveCoords() {
+/* ---------- MCTS (PUCT) : dan 신경망 + 탐색 ---------- */
+function mctsLegalMoves(bd, side, ko) {
   const out = [];
-  for (let i = history.length - 1; i >= 0 && out.length < 5; i--) {
-    const lm = history[i].lastMove;
-    out.push(lm ? [lm.x, lm.y] : [-1, -1]);
+  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+    if (bd[y][x] !== EMPTY) continue;
+    if (isOwnEye(bd, x, y, side)) continue;
+    const t = bd.map(r => r.slice());
+    if (!tryPlayFast(t, x, y, side, ko)) continue;
+    out.push([x, y]);
   }
-  // 현재 lastMove도 포함 (가장 최근)
-  out.unshift(lastMove ? [lastMove.x, lastMove.y] : [-1, -1]);
-  return out.slice(0, 5);
+  return out;
 }
+function MctsNode(side, ko) {
+  return { side, ko, children: new Map(), N: 0, Wsum: 0, P: new Map(), moves: [], expanded: false };
+}
+async function mctsExpand(node, bd) {
+  const ev = await kataEval(bd, node.side);
+  if (!ev) return 0;
+  const moves = mctsLegalMoves(bd, node.side, node.ko);
+  const logits = moves.map(([x, y]) => ev.polRaw[19 * y + x]);
+  let probs = logits.length ? softmaxArr(logits) : [];
+  // 전술 보너스: 따냄/단수 탈출은 시뮬레이션이 적어도 우선 탐색되게 확률을 끌어올림
+  const side = node.side, enemy = 3 - side;
+  probs = probs.map((p, i) => {
+    const [x, y] = moves[i];
+    const t = bd.map(r => r.slice());
+    let before = 0; for (const row of bd) for (const c of row) if (c === enemy) before++;
+    tryPlayFast(t, x, y, side, node.ko);
+    let after = 0; for (const row of t) for (const c of row) if (c === enemy) after++;
+    const cap = before - after;               // 이 수로 따내는 적 돌 수
+    let bonus = 0;
+    if (cap > 0) bonus += Math.min(0.4, cap * 0.15);
+    return p + bonus;
+  });
+  const s = probs.reduce((a, b) => a + b, 0) || 1;
+  probs = probs.map(p => p / s);
+  moves.forEach(([x, y], i) => node.P.set(x * 16 + y, probs[i]));
+  node.moves = moves;
+  node.expanded = true;
+  return ev.value;
+}
+function mctsBackup(path, leafValue) {
+  let v = leafValue;
+  for (let i = path.length - 1; i >= 0; i--) {
+    path[i].N++;
+    path[i].Wsum += v;
+    v = -v;
+  }
+}
+// AI 고수: 신경망+탐색으로 착수 결정. 시간예산(ms) 안에서 시뮬레이션.
+async function kataMctsMove(side, budgetMs) {
+  const CPUCT = 1.4;
+  const root = MctsNode(side, null);
+  const v0 = await mctsExpand(root, board);
+  if (root.moves.length === 0) return null;   // 둘 곳 없음 → 패스
+  mctsBackup([root], v0);
 
-// 9x9 국면 → KataGo 입력 텐서
-function kataInput(side) {
-  const CH = 22, GL = 19;
-  const bin = new Float32Array(361 * CH);
-  const glob = new Float32Array(GL);
-  const me = side, opp = 3 - side;
-  for (let y = 0; y < SIZE; y++) {
-    for (let x = 0; x < SIZE; x++) {
-      const sq = 19 * y + x;
-      bin[CH * sq + 0] = 1.0;                        // 마스크: 여기가 판이다
-      if (board[y][x] === me) bin[CH * sq + 1] = 1.0;
-      if (board[y][x] === opp) bin[CH * sq + 2] = 1.0;
-      if (board[y][x] !== EMPTY) {
-        const L = libCountAt(board, x, y);
-        if (L === 1) bin[CH * sq + 3] = 1.0;
-        if (L === 2) bin[CH * sq + 4] = 1.0;
-        if (L === 3) bin[CH * sq + 5] = 1.0;
+  const start = Date.now();
+  let sims = 0;
+  const MAX_SIMS = 400;
+  while (Date.now() - start < budgetMs && sims < MAX_SIMS) {
+    let node = root;
+    const bd = board.map(r => r.slice());
+    const path = [root];
+    while (true) {
+      if (!node.expanded || node.moves.length === 0) { mctsBackup(path, 0); break; }
+      let best = null, bestU = -Infinity;
+      const sqrtN = Math.sqrt(node.N + 1);
+      for (const [x, y] of node.moves) {
+        const k = x * 16 + y;
+        const child = node.children.get(k);
+        const q = (child && child.N) ? -(child.Wsum / child.N) : 0;
+        const p = node.P.get(k) || 0;
+        const u = q + CPUCT * p * sqrtN / (1 + (child ? child.N : 0));
+        if (u > bestU) { bestU = u; best = [x, y, k]; }
+      }
+      const [bx, by, bk] = best;
+      const res = tryPlayFast(bd, bx, by, node.side, node.ko);
+      let child = node.children.get(bk);
+      if (!child) {
+        child = MctsNode(3 - node.side, res ? res.ko : null);
+        node.children.set(bk, child);
+        path.push(child);
+        const v = await mctsExpand(child, bd);
+        mctsBackup(path, v);
+        break;
+      } else {
+        node = child; path.push(child);
       }
     }
+    sims++;
+    if (sims % 8 === 0) await tick();   // 화면 안 굳게
   }
-  const rec = recentMoveCoords();
-  for (let i = 0; i < rec.length; i++) {
-    const [mx, my] = rec[i];
-    if (mx >= 0 && mx < SIZE && my >= 0 && my < SIZE)
-      bin[CH * (19 * my + mx) + 9 + i] = 1.0;
+  // 방문 최다 수 선택
+  let best = null, bestN = -1;
+  for (const [x, y] of root.moves) {
+    const c = root.children.get(x * 16 + y);
+    const n = c ? c.N : 0;
+    if (n > bestN) { bestN = n; best = { x, y }; }
   }
-  const selfKomi = side === WHITE ? KOMI : -KOMI;
-  glob[5] = selfKomi / 20.0;
-  return { bin, glob };
-}
-
-// 신경망으로 착수 결정 → {x, y} 또는 null(둘 곳 없음/패스)
-async function kataChooseMove(side) {
-  const model = await loadKata();
-  if (!model) return undefined;   // 로드 실패 → 호출부가 몬테카를로로 대체
-  const { bin, glob } = kataInput(side);
-  const binT = tf.tensor(bin, [1, 361, 22], 'float32');
-  const globT = tf.tensor(glob, [1, 19], 'float32');
-  let results;
-  try {
-    results = await model.executeAsync({
-      'swa_model/bin_inputs': binT, 'swa_model/global_inputs': globT
-    });
-  } finally {
-    binT.dispose(); globT.dispose();
-  }
-  results = Array.isArray(results) ? results : [results];
-  // 정책 텐서: 마지막 차원이 362인 것
-  let policyT = null;
-  for (const r of results) if (r.shape[r.shape.length - 1] === 362) { policyT = r; break; }
-  const raw = await policyT.data();
-  results.forEach(r => r.dispose());
-
-  // 상위 후보를 순서대로 시도 (합법 & 자기 눈 아님)
-  const flat = Array.from(raw.slice(0, 361));
-  const order = flat.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]);
-  for (const [, idx] of order) {
-    const x = idx % 19, y = Math.floor(idx / 19);
-    if (x >= SIZE || y >= SIZE) continue;         // 판 밖
-    if (board[y][x] !== EMPTY) continue;          // 이미 돌 있음
-    if (isOwnEye(board, x, y, side)) continue;    // 자기 눈은 안 메움
-    const test = board.map(r => r.slice());
-    if (!tryPlayFast(test, x, y, side, null)) continue;  // 자살수 등
-    const s = boardString(test);
-    if (positions.length >= 2 && s === positions[positions.length - 2]) continue; // 패
-    return { x, y };
-  }
-  return null;   // 둘 만한 곳 없음 → 패스
+  // 루트 가치가 매우 나쁘면 불계 신호로 승률 반환도 함께
+  return best;
 }
 
 function maybeScheduleAI() {
@@ -1183,19 +1287,18 @@ async function aiMove() {
 
   const enemy = aiColor === BLACK ? WHITE : BLACK;
 
-  // ----- AI 고수 (aiLevel 3): KataGo 신경망 -----
+  // ----- AI 고수 (aiLevel 3): dan 신경망 + MCTS 탐색 -----
   if (aiLevel === 3) {
-    // 상대가 쉬었으면: 신경망도 둘 곳 없으면 같이 쉼 (아래 chooseMove가 판단)
-    const nnMove = await kataChooseMove(aiColor);
-    if (nnMove === undefined) {
-      // 신경망 로드 실패 → 이번 판은 몬테카를로로 안전하게 대체 (아래로 진행)
-    } else {
-      aiLowStreak = 0;   // 고수는 불계 안 함 (끝까지 둠)
+    const model = await loadKata();
+    if (model) {
+      const mv = await kataMctsMove(aiColor, 8000);   // 최대 8초 탐색
+      aiLowStreak = 0;                                 // 고수는 끝까지 둠
       aiThinking = false;
-      if (nnMove === null) { aiActing = true; pass(); aiActing = false; }
-      else { aiActing = true; tryMove(nnMove.x, nnMove.y); aiActing = false; }
+      if (mv === null) { aiActing = true; pass(); aiActing = false; }
+      else { aiActing = true; tryMove(mv.x, mv.y); aiActing = false; }
       return;
     }
+    // 로드 실패 → 아래 몬테카를로로 안전 대체
   }
 
   const mult = [0.4, 1, 2.2][Math.min(aiLevel, 2)];
@@ -1292,10 +1395,10 @@ function setPlayerNames() {
 /* ---------- 대국 설정 화면 ---------- */
 function showSetup() {
   clearTimeout(aiTimer);
-  let selMode = gameMode, selColor = (aiColor === WHITE ? BLACK : WHITE);
-  let selLevel = (aiLevel === 3 ? 3 : 1);
-  // selColor는 "내 돌" 기준
-
+  let selMode = gameMode || 'ai';
+  let selColor = (aiColor === WHITE ? BLACK : WHITE);   // "내 돌" 기준
+  let selKomi = KOMI;
+  let selHandi = handicap;
   const overlay = document.getElementById('setupOverlay');
   overlay.className = 'result-overlay';
 
@@ -1308,45 +1411,65 @@ function showSetup() {
       + '<button class="opt' + (selMode === 'ai' ? ' sel' : '') + '" data-k="mode" data-v="ai">AI와 대국</button>'
       + '<button class="opt' + (selMode === 'pvp' ? ' sel' : '') + '" data-k="mode" data-v="pvp">둘이서 두기</button>'
       + '</div>'
-      + '<div' + aiRows + '><div class="opt-label">내 돌</div>'
+      + '<div' + aiRows + '>'
+      + '<div class="opt-label">내 돌</div>'
       + '<div class="opt-row">'
-      + '<button class="opt' + (selColor === BLACK ? ' sel' : '') + '" data-k="color" data-v="b">흑 (먼저 두기)</button>'
+      + '<button class="opt' + (selColor === BLACK ? ' sel' : '') + '" data-k="color" data-v="b">흑 (먼저)</button>'
       + '<button class="opt' + (selColor === WHITE ? ' sel' : '') + '" data-k="color" data-v="w">백</button>'
       + '</div>'
-      + '<div class="opt-label">AI 기력</div>'
-      + '<div class="opt-row">'
-      + '<button class="opt' + (selLevel === 1 ? ' sel' : '') + '" data-k="level" data-v="1">입문자용</button>'
-      + '<button class="opt' + (selLevel === 3 ? ' sel' : '') + '" data-k="level" data-v="3">AI 고수</button>'
+      + '<div class="opt-hint">상대는 KataGo 신경망 (1단급) · 한 수에 몇 초 생각합니다</div>'
       + '</div>'
-      + '<div class="opt-hint" id="levelHint"></div></div>'
+      + '<div class="opt-label">덤 (공제)</div>'
+      + '<div class="stepper"><button class="step" data-k="komi-">−</button>'
+      + '<span class="stepval" id="komiVal">' + selKomi.toFixed(1) + '</span>'
+      + '<button class="step" data-k="komi+">+</button></div>'
+      + '<div class="opt-label">치수 (접바둑)</div>'
+      + '<div class="stepper"><button class="step" data-k="handi-">−</button>'
+      + '<span class="stepval" id="handiVal">' + (selHandi === 0 ? '호선' : selHandi + '점') + '</span>'
+      + '<button class="step" data-k="handi+">+</button></div>'
       + '<button class="primary setup-start" id="btnStart">대국 시작</button>'
       + '</div>';
-
-    const hint = document.getElementById('levelHint');
-    if (hint) hint.textContent = selLevel === 3
-      ? 'KataGo 신경망 · OGS 5급 수준 (첫 수는 불러오는 데 잠시 걸려요)'
-      : '가볍고 빠른 상대 · 규칙과 감각 익히기에 좋아요';
 
     overlay.querySelectorAll('.opt').forEach(btn => {
       btn.addEventListener('click', () => {
         const k = btn.dataset.k, v = btn.dataset.v;
-        if (k === 'mode') selMode = v;
+        if (k === 'mode') {
+          selMode = v;
+          if (v === 'pvp') { startGame(); return; }  // 둘이서 두기는 바로 시작
+        }
         if (k === 'color') selColor = (v === 'b' ? BLACK : WHITE);
-        if (k === 'level') selLevel = Number(v);
         render();
       });
     });
-    document.getElementById('btnStart').addEventListener('click', () => {
-      gameMode = selMode;
-      aiColor = (selColor === BLACK ? WHITE : BLACK);
-      aiLevel = selLevel;
-      if (gameMode === 'ai' && aiLevel === 3) loadKata();  // 미리 불러오기 시작
-      overlay.className = 'hidden';
-      overlay.innerHTML = '';
-      newGame();
-      maybeScheduleAI();   // AI가 흑이면 첫 수를 둠
+    overlay.querySelectorAll('.step').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const k = btn.dataset.k;
+        if (k === 'komi-') selKomi = Math.max(0.5, Math.round((selKomi - 1) * 10) / 10);
+        if (k === 'komi+') selKomi = Math.min(9.5, Math.round((selKomi + 1) * 10) / 10);
+        if (k === 'handi-') selHandi = Math.max(0, selHandi - 1);
+        if (k === 'handi+') selHandi = Math.min(5, selHandi + 1);
+        // 접바둑이면 덤은 통상 0.5로 (표시만 갱신, 사용자가 다시 조절 가능)
+        render();
+      });
     });
+    document.getElementById('btnStart').addEventListener('click', startGame);
   }
+
+  function startGame() {
+    gameMode = selMode;
+    KOMI = selKomi;
+    handicap = selHandi;
+    if (selMode === 'ai') {
+      aiColor = (selColor === BLACK ? WHITE : BLACK);
+      aiLevel = 3;             // AI는 항상 고수(dan+MCTS)
+      loadKata();              // 미리 불러오기 시작
+    }
+    overlay.className = 'hidden';
+    overlay.innerHTML = '';
+    newGame();
+    maybeScheduleAI();
+  }
+
   render();
 }
 
