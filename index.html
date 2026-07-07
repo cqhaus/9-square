@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>아홉 · 9_Square — 9줄 바둑</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.21.0/dist/tf.min.js"></script>
 <style>
   :root {
     --bg: #1c2622;
@@ -144,6 +145,16 @@
   .result-card .detail b { color: var(--ink); }
   .result-card .btns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
   .result-card .btns button { font-size: 13px; padding: 11px 0; }
+  /* ---------- 대국 설정 화면 ---------- */
+  .opt-label { font-size: 12px; color: var(--ink-dim); margin: 14px 0 6px; letter-spacing: 0.06em; }
+  .opt-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .opt {
+    padding: 10px 14px; font-size: 14px; border-radius: 10px;
+    background: rgba(255,255,255,0.06);
+  }
+  .opt.sel { background: var(--accent); border-color: transparent; }
+  .setup-start { margin-top: 20px; width: 100%; }
+  .opt-hint { font-size: 11px; color: var(--ink-dim); margin-top: 8px; line-height: 1.5; min-height: 2.6em; }
 </style>
 </head>
 <body>
@@ -165,14 +176,14 @@
   <div class="player black" id="pBlack">
     <div class="dot black"></div>
     <div>
-      <div>흑</div>
+      <div id="nameBlack">흑</div>
       <div class="captures">사석 <b id="capBlack">0</b></div>
     </div>
   </div>
   <div class="turn-label" id="turnLabel"><b>흑</b> 차례</div>
   <div class="player white" id="pWhite">
     <div>
-      <div style="text-align:right">백</div>
+      <div id="nameWhite" style="text-align:right">백</div>
       <div class="captures">사석 <b id="capWhite">0</b></div>
     </div>
     <div class="dot white"></div>
@@ -197,6 +208,7 @@
 
 <div class="toast" id="toast"></div>
 <div id="resultOverlay" class="hidden"></div>
+<div id="setupOverlay" class="hidden"></div>
 
 <script>
 /* ============================================================
@@ -228,6 +240,13 @@ let gameOver;
 let fixing;
 let deadStones;
 let territoryMarks;
+let gameMode = 'ai';      // 'pvp'(둘이서) | 'ai'(AI 대국)
+let aiColor = WHITE;      // AI가 잡은 돌 색
+let aiLevel = 1;          // 0 순한 상대, 1 보통, 2 센 상대
+let aiThinking = false;   // AI가 수를 읽는 중
+let aiActing = false;     // AI가 착수/패스를 실행하는 순간
+let aiLowStreak = 0;      // AI 승률이 바닥인 연속 횟수 (불계 판단용)
+let aiTimer = null;       // 예약된 AI 차례 타이머
 
 function px(i) { return MARGIN + i * SPACING_X; }
 function py(i) { return MARGIN + i * SPACING_Y; }
@@ -305,8 +324,10 @@ function drawBoardBase() {
 }
 
 function onTap(x, y) {
-  if (fixing) toggleDead(x, y);
-  else tryMove(x, y);
+  if (fixing) { toggleDead(x, y); return; }
+  if (aiThinking) return;                                        // AI가 읽는 중
+  if (gameMode === 'ai' && turn === aiColor && !gameOver) return; // AI 차례
+  tryMove(x, y);
 }
 
 // ---------- 돌/집 그리기 ----------
@@ -355,6 +376,7 @@ function updateStatus() {
   document.getElementById('pWhite').classList.toggle('turn', !gameOver && turn === WHITE);
   const label = document.getElementById('turnLabel');
   if (fixing) label.innerHTML = '잘못 판정된 돌을 탭하세요';
+  else if (aiThinking) label.innerHTML = 'AI가 생각 중…';
   else if (gameOver) label.innerHTML = '대국 종료';
   else label.innerHTML = `<b>${turn === BLACK ? '흑' : '백'}</b> 차례`;
 
@@ -435,11 +457,14 @@ function tryMove(x, y) {
   turn = enemy;
   playStoneSound(capturedCount > 0);
   renderStones();
+  maybeScheduleAI();
 }
 
 // ---------- 한 수 쉬기 ----------
 function pass() {
   if (gameOver) return;
+  if (aiThinking) { showToast('AI가 생각 중입니다'); return; }
+  if (gameMode === 'ai' && turn === aiColor && !aiActing) return;
   history.push({
     board: board.map(r => r.slice()),
     turn, captures: { ...captures },
@@ -457,12 +482,15 @@ function pass() {
     playPassSound();
     showToast(`${turn === BLACK ? '백' : '흑'}이 한 수 쉬었습니다`);
     renderStones();
+    maybeScheduleAI();
   }
 }
 
 // ---------- 계가 요청 ----------
 function requestScoring() {
+  if (aiThinking) { showToast('AI가 생각 중입니다'); return; }
   if (board.flat().every(v => v === EMPTY)) { showToast('아직 둔 수가 없습니다'); return; }
+  clearTimeout(aiTimer);
   gameOver = true;
   showToast('죽은 돌을 판정하는 중...', 3000);
   // 토스트가 화면에 먼저 그려지도록 잠깐 양보한 뒤 계산 시작
@@ -716,7 +744,7 @@ function showResult(r) {
   });
   document.getElementById('btnNewFromResult').addEventListener('click', () => {
     closeResult();
-    newGame();
+    showSetup();
   });
 }
 
@@ -753,23 +781,36 @@ function resumePlay() {
 
 // ---------- 무르기 ----------
 function undo() {
+  if (aiThinking) { showToast('AI가 생각 중입니다'); return; }
   if (!history.length) { showToast('무를 수가 없습니다'); return; }
-  const prev = history.pop();
-  board = prev.board;
-  turn = prev.turn;
-  captures = prev.captures;
-  lastMove = prev.lastMove;
-  passCount = prev.passCount;
-  positions = prev.positions;
+  clearTimeout(aiTimer);
+
+  function popOnce() {
+    const prev = history.pop();
+    board = prev.board;
+    turn = prev.turn;
+    captures = prev.captures;
+    lastMove = prev.lastMove;
+    passCount = prev.passCount;
+    positions = prev.positions;
+  }
+  popOnce();
+  // AI 대국: 방금 무른 게 AI의 수였다면 내 수까지 한 번 더 무름
+  if (gameMode === 'ai' && turn === aiColor && history.length) popOnce();
+
   gameOver = false;
   fixing = false;
   deadStones = new Set();
   territoryMarks = [];
   renderStones();
+  maybeScheduleAI();   // 그래도 AI 차례라면 (예: AI가 흑 선수) 다시 두게 함
 }
 
 // ---------- 새 대국 ----------
 function newGame() {
+  clearTimeout(aiTimer);
+  aiThinking = false;
+  aiLowStreak = 0;
   board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
   turn = BLACK;
   captures = { [BLACK]: 0, [WHITE]: 0 };
@@ -781,6 +822,7 @@ function newGame() {
   lastMove = null;
   deadStones = new Set();
   territoryMarks = [];
+  setPlayerNames();
   renderStones();
 }
 
@@ -872,18 +914,455 @@ document.addEventListener('pointerdown', () => {
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 }, { once: true });
 
+/* ============================================================
+   AI 대국 엔진 (2단계)
+   계가에 쓰는 몬테카를로를 수읽기로 확장:
+   각 후보 수마다 "그 수를 둔 뒤 무작위로 끝까지 두면
+   몇 % 이기는가"를 계산해서 승률이 가장 높은 수를 고른다.
+   얕게 훑기 → 상위만 추리기 → 깊게 읽기 3단계로 시간을 아낀다.
+   ============================================================ */
+
+// 중국식 집계: 흑 점수 - (백 점수 + 덤). 무작위 종국판은 눈만 남으므로 정확.
+function areaScoreDiff(fin) {
+  let black = 0, white = 0;
+  const visited = new Set();
+  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+    const c = fin[y][x];
+    if (c === BLACK) black++;
+    else if (c === WHITE) white++;
+    else if (!visited.has(x * 16 + y)) {
+      const region = [];
+      const borders = new Set();
+      const stack = [[x, y]];
+      while (stack.length) {
+        const [cx, cy] = stack.pop();
+        const key = cx * 16 + cy;
+        if (visited.has(key)) continue;
+        visited.add(key);
+        region.push([cx, cy]);
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = cx + dx, ny = cy + dy;
+          if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
+          if (fin[ny][nx] === EMPTY) stack.push([nx, ny]);
+          else borders.add(fin[ny][nx]);
+        }
+      }
+      if (borders.size === 1) {
+        if (borders.has(BLACK)) black += region.length;
+        else white += region.length;
+      }
+    }
+  }
+  return black - (white + KOMI);
+}
+
+function tick() { return new Promise(r => setTimeout(r, 0)); }
+
+function countStones() {
+  let n = 0;
+  for (const row of board) for (const c of row) if (c !== EMPTY) n++;
+  return n;
+}
+
+// AI의 합법 후보 수 (초반엔 가장자리 1선 제외 — 속도와 기력 모두에 이득)
+function legalAIMoves(color) {
+  const out = [];
+  const opening = countStones() < 6;
+  const enemyC = color === BLACK ? WHITE : BLACK;
+
+  // 단수(활로 1)에 몰린 내 그룹의 활로 지점: 거기 두면 그 돌들을 살림
+  const rescuePoints = new Map();
+  const seenG = new Set();
+  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+    if (board[y][x] !== color || seenG.has(x * 16 + y)) continue;
+    const g = getGroupFast(board, x, y);
+    for (const [sx, sy] of g.stones) seenG.add(sx * 16 + sy);
+    if (g.libs === 1) {
+      for (const [sx, sy] of g.stones) {
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = sx + dx, ny = sy + dy;
+          if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE && board[ny][nx] === EMPTY) {
+            const k = nx + ',' + ny;
+            rescuePoints.set(k, (rescuePoints.get(k) || 0) + g.stones.length);
+          }
+        }
+      }
+    }
+  }
+
+  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+    if (board[y][x] !== EMPTY) continue;
+    if (opening && (x < 1 || x > SIZE - 2 || y < 1 || y > SIZE - 2)) continue;
+    if (isOwnEye(board, x, y, color)) continue;
+    const b = board.map(r => r.slice());
+    let enemyBefore = 0, enemyAfter = 0;
+    for (const row of board) for (const c of row) if (c === enemyC) enemyBefore++;
+    if (!tryPlayFast(b, x, y, color, null)) continue;             // 자살수 등
+    const s = boardString(b);
+    if (positions.length >= 2 && s === positions[positions.length - 2]) continue; // 패
+    for (const row of b) for (const c of row) if (c === enemyC) enemyAfter++;
+    const capCount = enemyBefore - enemyAfter;                    // 따내는 돌 수
+    const saveCount = rescuePoints.get(x + ',' + y) || 0;         // 살리는 돌 수
+    // 무작위 수읽기는 '어차피 죽을 돌'을 지금 잡을 이유를 못 느끼므로
+    // 따내기/살리기에 가산점을 줘서 사람다운 전술 감각을 입힌다
+    const bonus = Math.min(0.45, capCount * 0.18) + Math.min(0.35, saveCount * 0.12);
+    out.push({ x, y, wins: 0, visits: 0, bonus });
+  }
+  return out;
+}
+
+// 최종 평가 = 몬테카를로 승률 + 전술 보너스
+function moveRate(m) { return m.wins / m.visits + m.bonus; }
+
+// 후보 수들을 각각 nEach판씩 무작위 종국까지 둬보고 승수를 기록
+async function evalMoves(cands, nEach, enemy) {
+  let sinceTick = 0;
+  for (const m of cands) {
+    const base = board.map(r => r.slice());
+    tryPlayFast(base, m.x, m.y, aiColor, null);
+    for (let p = 0; p < nEach; p++) {
+      const fin = playout(base, enemy);
+      const diff = areaScoreDiff(fin);
+      const aiWin = aiColor === BLACK ? diff > 0 : diff < 0;
+      if (aiWin) m.wins++;
+      m.visits++;
+    }
+    sinceTick += nEach;
+    if (sinceTick >= 60) { sinceTick = 0; await tick(); }  // 화면이 굳지 않게 숨 고르기
+  }
+}
+
+/* ============================================================
+   AI 고수 — KataGo 신경망 (TensorFlow.js)
+   maksimKorzh/go 프로젝트의 6블록 kyu 신경망(약 4MB, OGS 5급).
+   원본 KataGo by Lightvector, tfjs 변환 by Yuji Ichikawa.
+   검색(MCTS) 없이 신경망의 착점 직관만 사용 → 한 수 1초 이내.
+   9x9 국면을 19x19 텐서의 좌상단에 놓고 마스크로 판 크기를 알린다.
+   ============================================================ */
+let kataModel = null;       // 로드된 신경망 (한 번만 로드)
+let kataLoading = null;     // 로딩 프라미스 (중복 로드 방지)
+let kataFailed = false;     // 로드 실패 시 몬테카를로로 대체
+
+async function loadKata() {
+  if (kataModel) return kataModel;
+  if (kataLoading) return kataLoading;
+  kataLoading = (async () => {
+    try {
+      if (typeof tf === 'undefined') throw new Error('tf 없음');
+      try { await tf.setBackend('webgl'); } catch (e) {}
+      if (tf.getBackend() !== 'webgl') { try { await tf.setBackend('cpu'); } catch (e) {} }
+      kataModel = await tf.loadGraphModel('model/kyu/model.json');
+      // 예열: 첫 추론이 느리므로 미리 한 번 돌려둔다
+      const warmBin = tf.zeros([1, 361, 22]);
+      const warmGlob = tf.zeros([1, 19]);
+      const r = await kataModel.executeAsync({
+        'swa_model/bin_inputs': warmBin, 'swa_model/global_inputs': warmGlob
+      });
+      (Array.isArray(r) ? r : [r]).forEach(t => t.dispose());
+      warmBin.dispose(); warmGlob.dispose();
+      return kataModel;
+    } catch (e) {
+      kataFailed = true;
+      return null;
+    }
+  })();
+  return kataLoading;
+}
+
+// 그룹의 활로 수 (신경망 입력용, board 전역 사용)
+function libCountAt(bd, x, y) {
+  const color = bd[y][x];
+  const seen = new Set(), libs = new Set(), st = [[x, y]];
+  while (st.length) {
+    const [cx, cy] = st.pop(); const k = cx * 16 + cy;
+    if (seen.has(k)) continue; seen.add(k);
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
+      if (bd[ny][nx] === EMPTY) libs.add(nx * 16 + ny);
+      else if (bd[ny][nx] === color) st.push([nx, ny]);
+    }
+  }
+  return libs.size;
+}
+
+// 최근 착수 좌표들을 최신순으로 (신경망 입력 채널 9~13용)
+function recentMoveCoords() {
+  const out = [];
+  for (let i = history.length - 1; i >= 0 && out.length < 5; i--) {
+    const lm = history[i].lastMove;
+    out.push(lm ? [lm.x, lm.y] : [-1, -1]);
+  }
+  // 현재 lastMove도 포함 (가장 최근)
+  out.unshift(lastMove ? [lastMove.x, lastMove.y] : [-1, -1]);
+  return out.slice(0, 5);
+}
+
+// 9x9 국면 → KataGo 입력 텐서
+function kataInput(side) {
+  const CH = 22, GL = 19;
+  const bin = new Float32Array(361 * CH);
+  const glob = new Float32Array(GL);
+  const me = side, opp = 3 - side;
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const sq = 19 * y + x;
+      bin[CH * sq + 0] = 1.0;                        // 마스크: 여기가 판이다
+      if (board[y][x] === me) bin[CH * sq + 1] = 1.0;
+      if (board[y][x] === opp) bin[CH * sq + 2] = 1.0;
+      if (board[y][x] !== EMPTY) {
+        const L = libCountAt(board, x, y);
+        if (L === 1) bin[CH * sq + 3] = 1.0;
+        if (L === 2) bin[CH * sq + 4] = 1.0;
+        if (L === 3) bin[CH * sq + 5] = 1.0;
+      }
+    }
+  }
+  const rec = recentMoveCoords();
+  for (let i = 0; i < rec.length; i++) {
+    const [mx, my] = rec[i];
+    if (mx >= 0 && mx < SIZE && my >= 0 && my < SIZE)
+      bin[CH * (19 * my + mx) + 9 + i] = 1.0;
+  }
+  const selfKomi = side === WHITE ? KOMI : -KOMI;
+  glob[5] = selfKomi / 20.0;
+  return { bin, glob };
+}
+
+// 신경망으로 착수 결정 → {x, y} 또는 null(둘 곳 없음/패스)
+async function kataChooseMove(side) {
+  const model = await loadKata();
+  if (!model) return undefined;   // 로드 실패 → 호출부가 몬테카를로로 대체
+  const { bin, glob } = kataInput(side);
+  const binT = tf.tensor(bin, [1, 361, 22], 'float32');
+  const globT = tf.tensor(glob, [1, 19], 'float32');
+  let results;
+  try {
+    results = await model.executeAsync({
+      'swa_model/bin_inputs': binT, 'swa_model/global_inputs': globT
+    });
+  } finally {
+    binT.dispose(); globT.dispose();
+  }
+  results = Array.isArray(results) ? results : [results];
+  // 정책 텐서: 마지막 차원이 362인 것
+  let policyT = null;
+  for (const r of results) if (r.shape[r.shape.length - 1] === 362) { policyT = r; break; }
+  const raw = await policyT.data();
+  results.forEach(r => r.dispose());
+
+  // 상위 후보를 순서대로 시도 (합법 & 자기 눈 아님)
+  const flat = Array.from(raw.slice(0, 361));
+  const order = flat.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]);
+  for (const [, idx] of order) {
+    const x = idx % 19, y = Math.floor(idx / 19);
+    if (x >= SIZE || y >= SIZE) continue;         // 판 밖
+    if (board[y][x] !== EMPTY) continue;          // 이미 돌 있음
+    if (isOwnEye(board, x, y, side)) continue;    // 자기 눈은 안 메움
+    const test = board.map(r => r.slice());
+    if (!tryPlayFast(test, x, y, side, null)) continue;  // 자살수 등
+    const s = boardString(test);
+    if (positions.length >= 2 && s === positions[positions.length - 2]) continue; // 패
+    return { x, y };
+  }
+  return null;   // 둘 만한 곳 없음 → 패스
+}
+
+function maybeScheduleAI() {
+  if (gameMode !== 'ai' || gameOver || fixing) return;
+  if (turn !== aiColor || aiThinking) return;
+  clearTimeout(aiTimer);
+  aiTimer = setTimeout(aiMove, 420);
+}
+
+async function aiMove() {
+  if (gameOver || aiThinking || turn !== aiColor) return;
+  aiThinking = true;
+  updateStatus();
+  await tick();
+
+  const enemy = aiColor === BLACK ? WHITE : BLACK;
+
+  // ----- AI 고수 (aiLevel 3): KataGo 신경망 -----
+  if (aiLevel === 3) {
+    // 상대가 쉬었으면: 신경망도 둘 곳 없으면 같이 쉼 (아래 chooseMove가 판단)
+    const nnMove = await kataChooseMove(aiColor);
+    if (nnMove === undefined) {
+      // 신경망 로드 실패 → 이번 판은 몬테카를로로 안전하게 대체 (아래로 진행)
+    } else {
+      aiLowStreak = 0;   // 고수는 불계 안 함 (끝까지 둠)
+      aiThinking = false;
+      if (nnMove === null) { aiActing = true; pass(); aiActing = false; }
+      else { aiActing = true; tryMove(nnMove.x, nnMove.y); aiActing = false; }
+      return;
+    }
+  }
+
+  const mult = [0.4, 1, 2.2][Math.min(aiLevel, 2)];
+
+  // 상대가 방금 한 수 쉬었다면: 이기고 있는지 가늠해서 이기고 있으면 같이 쉼 → 계가
+  if (passCount === 1) {
+    let winCount = 0;
+    const N = 50;
+    for (let p = 0; p < N; p++) {
+      const fin = playout(board, aiColor);
+      const diff = areaScoreDiff(fin);
+      if (aiColor === BLACK ? diff > 0 : diff < 0) winCount++;
+      if (p % 25 === 24) await tick();
+    }
+    if (winCount / N >= 0.5) {
+      aiThinking = false;
+      aiActing = true; pass(); aiActing = false;
+      return;
+    }
+  }
+
+  let cands = legalAIMoves(aiColor);
+  if (!cands.length) {
+    aiThinking = false;
+    aiActing = true; pass(); aiActing = false;
+    return;
+  }
+
+  // 1라운드: 모든 후보를 얕게
+  await evalMoves(cands, Math.max(2, Math.round(6 * mult)), enemy);
+  cands.sort((a, b) => moveRate(b) - moveRate(a));
+  const tact1 = cands.filter(m => m.bonus > 0);
+  cands = [...new Set([...cands.slice(0, 12), ...tact1.slice(0, 6)])];
+  // 2라운드: 상위 12개만 더
+  await evalMoves(cands, Math.max(4, Math.round(18 * mult)), enemy);
+  cands.sort((a, b) => moveRate(b) - moveRate(a));
+  const tact2 = cands.filter(m => m.bonus > 0);
+  cands = [...new Set([...cands.slice(0, 5), ...tact2.slice(0, 3)])];
+  // 3라운드: 상위 5개를 깊게
+  await evalMoves(cands, Math.max(8, Math.round(56 * mult)), enemy);
+  cands.sort((a, b) => moveRate(b) - moveRate(a));
+
+  let choice = cands[0];
+  // 순한 상대: 가끔 최선이 아닌 수를 둠
+  if (aiLevel === 0 && cands.length > 2 && Math.random() < 0.5) {
+    choice = cands[Math.floor(Math.random() * 3)];
+  }
+
+  const wr = choice.wins / choice.visits;   // 불계 판단은 순수 승률로
+  if (wr < 0.05) aiLowStreak++; else aiLowStreak = 0;
+
+  aiThinking = false;
+  if (aiLowStreak >= 2) { aiResign(); return; }
+
+  aiActing = true;
+  tryMove(choice.x, choice.y);
+  aiActing = false;
+}
+
+// AI가 돌을 던짐 (불계)
+function aiResign() {
+  gameOver = true;
+  renderStones();
+  const winner = aiColor === BLACK ? '백' : '흑';
+  const overlay = document.getElementById('resultOverlay');
+  overlay.className = 'result-overlay';
+  overlay.innerHTML = '<div class="result-card"><h2><span>' + winner + '</span> 불계승</h2>'
+    + '<div class="detail">AI가 돌을 던졌습니다.<br>축하합니다! 🎉</div>'
+    + '<div class="btns" style="grid-template-columns:1fr 1fr">'
+    + '<button id="btnBackR">판 보기</button>'
+    + '<button id="btnNewR" class="primary">새 대국</button></div></div>';
+  document.getElementById('btnBackR').addEventListener('click', () => {
+    overlay.className = 'hidden'; overlay.innerHTML = '';
+  });
+  document.getElementById('btnNewR').addEventListener('click', () => {
+    overlay.className = 'hidden'; overlay.innerHTML = '';
+    showSetup();
+  });
+}
+
+// ---------- 대국 상대 이름 표시 ----------
+function setPlayerNames() {
+  const nb = document.getElementById('nameBlack');
+  const nw = document.getElementById('nameWhite');
+  if (gameMode === 'ai') {
+    if (aiColor === BLACK) { nb.textContent = 'AI · 흑'; nw.textContent = '나 · 백'; }
+    else { nb.textContent = '나 · 흑'; nw.textContent = 'AI · 백'; }
+  } else {
+    nb.textContent = '흑';
+    nw.textContent = '백';
+  }
+}
+
+/* ---------- 대국 설정 화면 ---------- */
+function showSetup() {
+  clearTimeout(aiTimer);
+  let selMode = gameMode, selColor = (aiColor === WHITE ? BLACK : WHITE);
+  let selLevel = (aiLevel === 3 ? 3 : 1);
+  // selColor는 "내 돌" 기준
+
+  const overlay = document.getElementById('setupOverlay');
+  overlay.className = 'result-overlay';
+
+  function render() {
+    const aiRows = selMode === 'ai' ? '' : ' style="display:none"';
+    overlay.innerHTML = '<div class="result-card">'
+      + '<h2>새 <span>대국</span></h2>'
+      + '<div class="opt-label">대국 상대</div>'
+      + '<div class="opt-row">'
+      + '<button class="opt' + (selMode === 'ai' ? ' sel' : '') + '" data-k="mode" data-v="ai">AI와 대국</button>'
+      + '<button class="opt' + (selMode === 'pvp' ? ' sel' : '') + '" data-k="mode" data-v="pvp">둘이서 두기</button>'
+      + '</div>'
+      + '<div' + aiRows + '><div class="opt-label">내 돌</div>'
+      + '<div class="opt-row">'
+      + '<button class="opt' + (selColor === BLACK ? ' sel' : '') + '" data-k="color" data-v="b">흑 (먼저 두기)</button>'
+      + '<button class="opt' + (selColor === WHITE ? ' sel' : '') + '" data-k="color" data-v="w">백</button>'
+      + '</div>'
+      + '<div class="opt-label">AI 기력</div>'
+      + '<div class="opt-row">'
+      + '<button class="opt' + (selLevel === 1 ? ' sel' : '') + '" data-k="level" data-v="1">입문자용</button>'
+      + '<button class="opt' + (selLevel === 3 ? ' sel' : '') + '" data-k="level" data-v="3">AI 고수</button>'
+      + '</div>'
+      + '<div class="opt-hint" id="levelHint"></div></div>'
+      + '<button class="primary setup-start" id="btnStart">대국 시작</button>'
+      + '</div>';
+
+    const hint = document.getElementById('levelHint');
+    if (hint) hint.textContent = selLevel === 3
+      ? 'KataGo 신경망 · OGS 5급 수준 (첫 수는 불러오는 데 잠시 걸려요)'
+      : '가볍고 빠른 상대 · 규칙과 감각 익히기에 좋아요';
+
+    overlay.querySelectorAll('.opt').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const k = btn.dataset.k, v = btn.dataset.v;
+        if (k === 'mode') selMode = v;
+        if (k === 'color') selColor = (v === 'b' ? BLACK : WHITE);
+        if (k === 'level') selLevel = Number(v);
+        render();
+      });
+    });
+    document.getElementById('btnStart').addEventListener('click', () => {
+      gameMode = selMode;
+      aiColor = (selColor === BLACK ? WHITE : BLACK);
+      aiLevel = selLevel;
+      if (gameMode === 'ai' && aiLevel === 3) loadKata();  // 미리 불러오기 시작
+      overlay.className = 'hidden';
+      overlay.innerHTML = '';
+      newGame();
+      maybeScheduleAI();   // AI가 흑이면 첫 수를 둠
+    });
+  }
+  render();
+}
+
 // ---------- 시작 ----------
 document.getElementById('btnUndo').addEventListener('click', undo);
 document.getElementById('btnPass').addEventListener('click', pass);
 document.getElementById('btnScoreReq').addEventListener('click', requestScoring);
 document.getElementById('btnNew').addEventListener('click', () => {
-  if (confirm('새 대국을 시작할까요? 지금 판은 사라집니다.')) newGame();
+  showSetup();
 });
 document.getElementById('btnResume').addEventListener('click', resumePlay);
 document.getElementById('btnScoreDone').addEventListener('click', calculateScore);
 
 drawBoardBase();
 newGame();
+showSetup();
 </script>
 </body>
 </html>
