@@ -240,6 +240,18 @@ const svg = document.getElementById('board');
 const NS = 'http://www.w3.org/2000/svg';
 
 let board, turn, captures, history, positions, passCount, lastMove;
+
+// ---- KataGo 서버 연동 ----
+// 노트북 Tailscale 주소. 서버(katago_server.py)가 여기서 대기 중이어야 함.
+const KATAGO_SERVER = 'http://100.127.148.65:8000';
+let gtpMoves = [];        // 서버에 보낼 착수 기록 [["b","E5"],["w","C3"],...]
+const GTP_COLS = 'ABCDEFGHJKLMNOPQRST';   // I 없음
+function toGtp(x, y) { return GTP_COLS[x] + (SIZE - y); }
+function fromGtp(s) {
+  const col = GTP_COLS.indexOf(s[0].toUpperCase());
+  const row = parseInt(s.slice(1), 10);
+  return { x: col, y: SIZE - row };
+}
 let gameOver;
 let fixing;
 let deadStones;
@@ -458,6 +470,7 @@ function tryMove(x, y) {
   positions.push(newStr);
   lastMove = { x, y };
   passCount = 0;
+  gtpMoves.push([turn === BLACK ? 'b' : 'w', toGtp(x, y)]);
   turn = enemy;
   playStoneSound(capturedCount > 0);
   renderStones();
@@ -477,6 +490,7 @@ function pass() {
   });
   passCount++;
   positions.push(boardString(board));
+  gtpMoves.push([turn === BLACK ? 'b' : 'w', 'pass']);
   lastMove = null;
   turn = turn === BLACK ? WHITE : BLACK;
 
@@ -797,6 +811,7 @@ function undo() {
     lastMove = prev.lastMove;
     passCount = prev.passCount;
     positions = prev.positions;
+    gtpMoves.pop();   // 서버용 기록도 한 수 되돌림
   }
   popOnce();
   // AI 대국: 방금 무른 게 AI의 수였다면 내 수까지 한 번 더 무름
@@ -815,6 +830,7 @@ function newGame() {
   clearTimeout(aiTimer);
   aiThinking = false;
   aiLowStreak = 0;
+  gtpMoves = [];          // 서버용 착수 기록 초기화
   board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
   turn = BLACK;
   captures = { [BLACK]: 0, [WHITE]: 0 };
@@ -840,7 +856,7 @@ function placeHandicap() {
     4: [[2,2],[2,6],[6,2],[6,6]],
     5: [[2,2],[2,6],[6,2],[6,6],[4,4]],
   }[handicap] || [];
-  for (const [x, y] of pts) board[y][x] = BLACK;
+  for (const [x, y] of pts) { board[y][x] = BLACK; gtpMoves.push(['b', toGtp(x, y)]); }
   turn = WHITE;                         // 흑이 미리 놓았으니 백부터
   positions = [boardString(board)];
 }
@@ -1168,108 +1184,30 @@ function libCountOf(bd, x, y) {
 }
 function boardStringOf(bd) { return bd.map(r => r.join('')).join(''); }
 
-/* ---------- MCTS (PUCT) : dan 신경망 + 탐색 ---------- */
-function mctsLegalMoves(bd, side, ko) {
-  const out = [];
-  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
-    if (bd[y][x] !== EMPTY) continue;
-    if (isOwnEye(bd, x, y, side)) continue;
-    const t = bd.map(r => r.slice());
-    if (!tryPlayFast(t, x, y, side, ko)) continue;
-    out.push([x, y]);
-  }
-  return out;
-}
-function MctsNode(side, ko) {
-  return { side, ko, children: new Map(), N: 0, Wsum: 0, P: new Map(), moves: [], expanded: false };
-}
-async function mctsExpand(node, bd) {
-  const ev = await kataEval(bd, node.side);
-  if (!ev) return 0;
-  const moves = mctsLegalMoves(bd, node.side, node.ko);
-  const logits = moves.map(([x, y]) => ev.polRaw[19 * y + x]);
-  let probs = logits.length ? softmaxArr(logits) : [];
-  // 전술 보너스: 따냄/단수 탈출은 시뮬레이션이 적어도 우선 탐색되게 확률을 끌어올림
-  const side = node.side, enemy = 3 - side;
-  probs = probs.map((p, i) => {
-    const [x, y] = moves[i];
-    const t = bd.map(r => r.slice());
-    let before = 0; for (const row of bd) for (const c of row) if (c === enemy) before++;
-    tryPlayFast(t, x, y, side, node.ko);
-    let after = 0; for (const row of t) for (const c of row) if (c === enemy) after++;
-    const cap = before - after;               // 이 수로 따내는 적 돌 수
-    let bonus = 0;
-    if (cap > 0) bonus += Math.min(0.4, cap * 0.15);
-    return p + bonus;
-  });
-  const s = probs.reduce((a, b) => a + b, 0) || 1;
-  probs = probs.map(p => p / s);
-  moves.forEach(([x, y], i) => node.P.set(x * 16 + y, probs[i]));
-  node.moves = moves;
-  node.expanded = true;
-  return ev.value;
-}
-function mctsBackup(path, leafValue) {
-  let v = leafValue;
-  for (let i = path.length - 1; i >= 0; i--) {
-    path[i].N++;
-    path[i].Wsum += v;
-    v = -v;
-  }
-}
-// AI 고수: 신경망+탐색으로 착수 결정. 시간예산(ms) 안에서 시뮬레이션.
+// AI 고수: dan 신경망 정책을 그대로 따른다.
+// (AI끼리 대국 실측 결과, 순수 정책이 전술 보너스나 MCTS보다 확실히 강했다.
+//  이 신경망은 그 자체로 충분히 세므로 인위적 개입은 오히려 실력을 떨어뜨린다.)
 async function kataMctsMove(side, budgetMs) {
-  const CPUCT = 1.4;
-  const root = MctsNode(side, null);
-  const v0 = await mctsExpand(root, board);
-  if (root.moves.length === 0) return null;   // 둘 곳 없음 → 패스
-  mctsBackup([root], v0);
+  const ev = await kataEval(board, side);
+  if (!ev) return undefined;                 // 로드 실패 → 호출부가 대체
 
-  const start = Date.now();
-  let sims = 0;
-  const MAX_SIMS = 400;
-  while (Date.now() - start < budgetMs && sims < MAX_SIMS) {
-    let node = root;
-    const bd = board.map(r => r.slice());
-    const path = [root];
-    while (true) {
-      if (!node.expanded || node.moves.length === 0) { mctsBackup(path, 0); break; }
-      let best = null, bestU = -Infinity;
-      const sqrtN = Math.sqrt(node.N + 1);
-      for (const [x, y] of node.moves) {
-        const k = x * 16 + y;
-        const child = node.children.get(k);
-        const q = (child && child.N) ? -(child.Wsum / child.N) : 0;
-        const p = node.P.get(k) || 0;
-        const u = q + CPUCT * p * sqrtN / (1 + (child ? child.N : 0));
-        if (u > bestU) { bestU = u; best = [x, y, k]; }
-      }
-      const [bx, by, bk] = best;
-      const res = tryPlayFast(bd, bx, by, node.side, node.ko);
-      let child = node.children.get(bk);
-      if (!child) {
-        child = MctsNode(3 - node.side, res ? res.ko : null);
-        node.children.set(bk, child);
-        path.push(child);
-        const v = await mctsExpand(child, bd);
-        mctsBackup(path, v);
-        break;
-      } else {
-        node = child; path.push(child);
-      }
-    }
-    sims++;
-    if (sims % 8 === 0) await tick();   // 화면 안 굳게
+  // 신경망 정책 점수가 높은 순으로 합법수를 찾아 둔다
+  const order = [];
+  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+    order.push([ev.polRaw[19 * y + x], x, y]);
   }
-  // 방문 최다 수 선택
-  let best = null, bestN = -1;
-  for (const [x, y] of root.moves) {
-    const c = root.children.get(x * 16 + y);
-    const n = c ? c.N : 0;
-    if (n > bestN) { bestN = n; best = { x, y }; }
+  order.sort((a, b) => b[0] - a[0]);
+
+  for (const [, x, y] of order) {
+    if (board[y][x] !== EMPTY) continue;
+    if (isOwnEye(board, x, y, side)) continue;      // 자기 눈은 안 메움
+    const test = board.map(r => r.slice());
+    if (!tryPlayFast(test, x, y, side, null)) continue;   // 자살수 등
+    const s = boardStringOf(test);
+    if (positions.length >= 2 && s === positions[positions.length - 2]) continue; // 패
+    return { x, y };
   }
-  // 루트 가치가 매우 나쁘면 불계 신호로 승률 반환도 함께
-  return best;
+  return null;                                       // 둘 곳 없음 → 패스
 }
 
 function maybeScheduleAI() {
@@ -1280,6 +1218,50 @@ function maybeScheduleAI() {
 }
 
 async function aiMove() {
+  if (gameOver || aiThinking || turn !== aiColor) return;
+  aiThinking = true;
+  updateStatus();
+  await tick();
+
+  // ----- 서버의 KataGo에게 다음 수를 물어본다 -----
+  try {
+    const color = aiColor === BLACK ? 'b' : 'w';
+    const res = await fetch(KATAGO_SERVER + '/genmove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        moves: gtpMoves,
+        color: color,
+        boardsize: SIZE,
+        komi: KOMI,
+      }),
+    });
+    if (!res.ok) throw new Error('서버 응답 오류 ' + res.status);
+    const data = await res.json();
+    const mv = data.move;                      // "F6" / "pass" / "resign"
+    aiThinking = false;
+
+    if (!mv || mv.toLowerCase() === 'resign') {
+      aiResign();                              // KataGo가 돌을 던짐
+      return;
+    }
+    if (mv.toLowerCase() === 'pass') {
+      aiActing = true; pass(); aiActing = false;
+      return;
+    }
+    const p = fromGtp(mv);
+    aiActing = true; tryMove(p.x, p.y); aiActing = false;
+    return;
+  } catch (e) {
+    aiThinking = false;
+    updateStatus();
+    showToast('AI 서버에 연결할 수 없습니다. 노트북 서버와 Tailscale을 확인하세요');
+    return;
+  }
+}
+
+// (아래는 예전 로컬 AI 코드 — 서버 방식에서는 안 쓰지만 남겨둠)
+async function aiMove_local_unused() {
   if (gameOver || aiThinking || turn !== aiColor) return;
   aiThinking = true;
   updateStatus();
