@@ -49,6 +49,19 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .taegeuk { animation: none; } }
   .brand-en { font-size: 18px; font-weight: 800; color: var(--accent); letter-spacing: 0.04em; }
+  .brand-right { display: flex; align-items: center; gap: 10px; }
+  #logoHome { cursor: pointer; }
+  .gear {
+    background: none; border: none; padding: 4px; margin: 0;
+    color: var(--ink-dim); cursor: pointer; display: flex; align-items: center;
+    transition: color 0.2s, transform 0.3s;
+  }
+  .gear:hover { color: var(--accent); transform: rotate(45deg); }
+  .hintDot { animation: hintBlink 1.1s ease-in-out infinite; pointer-events: none; }
+  .hintBest { animation: hintBlinkBest 1.1s ease-in-out infinite; }
+  @keyframes hintBlink { 0%,100% { opacity: 0.15; } 50% { opacity: 0.5; } }
+  @keyframes hintBlinkBest { 0%,100% { opacity: 0.45; } 50% { opacity: 0.95; } }
+  @media (prefers-reduced-motion: reduce) { .hintDot, .hintBest { animation: none; } }
 
   .status {
     width: 100%;
@@ -163,7 +176,7 @@
 <body>
 
 <header>
-  <h1>아홉
+  <h1 id="logoHome" title="바둑판으로">아홉
     <svg class="taegeuk" viewBox="0 0 100 100" aria-hidden="true">
       <circle cx="50" cy="50" r="48" fill="#f2f0ea"/>
       <path d="M50 2 a48 48 0 0 1 0 96 a24 24 0 0 1 0 -48 a24 24 0 0 0 0 -48 z" fill="#1b1b1b"/>
@@ -172,7 +185,15 @@
       <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>
     </svg>
   </h1>
-  <div class="brand-en">9_Square</div>
+  <div class="brand-right">
+    <button id="btnSettings" class="gear" title="새 대국 설정" aria-label="설정">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+    <div class="brand-en">9_Square</div>
+  </div>
 </header>
 
 <div class="status">
@@ -198,11 +219,12 @@
 </div>
 
 <div class="controls" id="playControls">
-  <button id="btnUndo">무르기</button>
-  <button id="btnPass">한 수 쉬기</button>
+  <button id="btnUndo" title="한 수 무르기">&lt;=</button>
+  <button id="btnRedo" title="한 수 앞으로">=&gt;</button>
+  <button id="btnHint">힌트</button>
   <button id="btnScoreReq" class="primary">계가</button>
-  <button id="btnNew">새 대국</button>
   <button id="btnCopyRec" title="진단용 대국 기록 복사">기록</button>
+  <button id="btnNew">새 대국</button>
 </div>
 
 <div class="controls hidden" id="fixControls">
@@ -246,12 +268,52 @@ let board, turn, captures, history, positions, passCount, lastMove;
 // 노트북 Tailscale 주소. 서버(katago_server.py)가 여기서 대기 중이어야 함.
 const KATAGO_SERVER = 'http://100.127.148.65:8000';
 let gtpMoves = [];        // 서버에 보낼 착수 기록 [["b","E5"],["w","C3"],...]
+let redoStack = [];       // 무르기로 되돌린 수들 (=> 로 다시 진행)
+let hintMarks = [];       // 현재 표시된 힌트 점들
 const GTP_COLS = 'ABCDEFGHJKLMNOPQRST';   // I 없음
 function toGtp(x, y) { return GTP_COLS[x] + (SIZE - y); }
 function fromGtp(s) {
   const col = GTP_COLS.indexOf(s[0].toUpperCase());
   const row = parseInt(s.slice(1), 10);
   return { x: col, y: SIZE - row };
+}
+
+// ---------- 힌트 (KataGo 추천 수 표시) ----------
+let hintLoading = false;
+function clearHint() {
+  if (hintMarks.length) { hintMarks = []; if (typeof renderStones === 'function') renderStones(); }
+}
+function toggleHint() {
+  // 이미 켜져 있으면 끈다
+  if (hintMarks.length) { clearHint(); return; }
+  if (hintLoading) return;
+  if (gameOver) { showToast('대국이 끝났습니다'); return; }
+  requestHint();
+}
+async function requestHint() {
+  hintLoading = true;
+  showToast('KataGo에게 추천 수를 묻는 중…', 2500);
+  try {
+    const color = turn === BLACK ? 'b' : 'w';
+    const res = await fetch(KATAGO_SERVER + '/hint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ moves: gtpMoves, color, boardsize: SIZE, komi: KOMI, top: 5 }),
+    });
+    if (!res.ok) throw new Error('서버 오류 ' + res.status);
+    const data = await res.json();
+    const cands = data.candidates || [];
+    if (!cands.length) { showToast('추천 수를 찾지 못했습니다'); return; }
+    hintMarks = cands.map(c => {
+      const p = fromGtp(c.move);
+      return { x: p.x, y: p.y, best: c.order === 0 };
+    }).filter(h => h.x >= 0 && h.x < SIZE && h.y >= 0 && h.y < SIZE);
+    renderStones();
+  } catch (e) {
+    showToast('AI 서버에 연결할 수 없습니다');
+  } finally {
+    hintLoading = false;
+  }
 }
 
 // 지금까지의 대국 기록을 진단용 텍스트로 만들어 클립보드에 복사
@@ -425,6 +487,19 @@ function renderStones() {
       }
     }
   }
+
+  // 힌트 점 (KataGo 추천 수): 최선은 크고 선명, 나머지는 작고 흐릿
+  for (const h of hintMarks) {
+    if (board[h.y][h.x] !== EMPTY) continue;
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', px(h.x)); c.setAttribute('cy', py(h.y));
+    c.setAttribute('r', h.best ? 15 : 9);
+    c.setAttribute('fill', '#35d07f');
+    c.setAttribute('opacity', h.best ? 0.85 : 0.4);
+    c.classList.add('hintDot');
+    if (h.best) c.classList.add('hintBest');
+    g.appendChild(c);
+  }
   updateStatus();
 }
 
@@ -435,6 +510,7 @@ function updateStatus() {
   document.getElementById('pWhite').classList.toggle('turn', !gameOver && turn === WHITE);
   const label = document.getElementById('turnLabel');
   if (fixing) label.innerHTML = '잘못 판정된 돌을 탭하세요';
+  else if (!gameStarted) label.innerHTML = '⚙ 설정을 눌러 새 대국을 시작하세요';
   else if (aiThinking) label.innerHTML = 'AI가 생각 중…';
   else if (gameOver) label.innerHTML = '대국 종료';
   else label.innerHTML = `<b>${turn === BLACK ? '흑' : '백'}</b> 차례`;
@@ -514,6 +590,8 @@ function tryMove(x, y) {
   lastMove = { x, y };
   passCount = 0;
   gtpMoves.push([turn === BLACK ? 'b' : 'w', toGtp(x, y)]);
+  redoStack = [];        // 새 수를 뒀으니 앞으로가기(redo) 기록은 무효
+  clearHint();
   turn = enemy;
   playStoneSound(capturedCount > 0);
   renderStones();
@@ -907,8 +985,17 @@ function undo() {
   if (aiThinking) { showToast('AI가 생각 중입니다'); return; }
   if (!history.length) { showToast('무를 수가 없습니다'); return; }
   clearTimeout(aiTimer);
+  clearHint();
 
   function popOnce() {
+    // 현재 상태를 redo 스택에 저장 (앞으로 다시 갈 수 있게)
+    redoStack.push({
+      board: board.map(r => r.slice()),
+      turn, captures: { ...captures },
+      lastMove, passCount,
+      positions: positions.slice(),
+      gtpMoves: gtpMoves.slice(),
+    });
     const prev = history.pop();
     board = prev.board;
     turn = prev.turn;
@@ -927,7 +1014,38 @@ function undo() {
   deadStones = new Set();
   territoryMarks = [];
   renderStones();
-  maybeScheduleAI();   // 그래도 AI 차례라면 (예: AI가 흑 선수) 다시 두게 함
+  // 무르기 후에는 AI 자동 착수를 하지 않는다 (사용자가 다시 두거나 =>로 진행)
+}
+
+// 한 수 앞으로 (무르기 되돌리기)
+function redo() {
+  if (aiThinking) { showToast('AI가 생각 중입니다'); return; }
+  if (!redoStack.length) { showToast('되돌릴 수가 없습니다'); return; }
+  clearTimeout(aiTimer);
+  clearHint();
+
+  function pushForward() {
+    // 현재 상태를 history에 저장하고, redo 스택에서 다음 상태 복원
+    history.push({
+      board: board.map(r => r.slice()),
+      turn, captures: { ...captures },
+      lastMove, passCount,
+      positions: positions.slice(),
+    });
+    const nxt = redoStack.pop();
+    board = nxt.board;
+    turn = nxt.turn;
+    captures = nxt.captures;
+    lastMove = nxt.lastMove;
+    passCount = nxt.passCount;
+    positions = nxt.positions;
+    gtpMoves = nxt.gtpMoves;
+  }
+  pushForward();
+  // AI 대국: 한 번 더 앞으로 (내 수 + AI 수 쌍)
+  if (gameMode === 'ai' && turn === aiColor && redoStack.length) pushForward();
+
+  renderStones();
 }
 
 // ---------- 새 대국 ----------
@@ -1479,6 +1597,14 @@ function setPlayerNames() {
   }
 }
 
+/* ---------- 첫 화면: 빈 바둑판 + 설정 안내 ---------- */
+let gameStarted = false;
+function showEmptyBoardHint() {
+  gameStarted = false;
+  const label = document.getElementById('turnLabel');
+  if (label) label.innerHTML = '⚙ 설정을 눌러 새 대국을 시작하세요';
+}
+
 /* ---------- 대국 설정 화면 ---------- */
 function showSetup() {
   clearTimeout(aiTimer);
@@ -1548,11 +1674,11 @@ function showSetup() {
     handicap = selHandi;
     if (selMode === 'ai') {
       aiColor = (selColor === BLACK ? WHITE : BLACK);
-      aiLevel = 3;             // AI는 항상 고수(dan+MCTS)
-      loadKata();              // 미리 불러오기 시작
+      aiLevel = 3;
     }
     overlay.className = 'hidden';
     overlay.innerHTML = '';
+    gameStarted = true;
     newGame();
     maybeScheduleAI();
   }
@@ -1562,18 +1688,23 @@ function showSetup() {
 
 // ---------- 시작 ----------
 document.getElementById('btnUndo').addEventListener('click', undo);
-document.getElementById('btnPass').addEventListener('click', pass);
+document.getElementById('btnRedo').addEventListener('click', redo);
+document.getElementById('btnHint').addEventListener('click', toggleHint);
 document.getElementById('btnScoreReq').addEventListener('click', requestScoring);
 document.getElementById('btnCopyRec').addEventListener('click', copyGameRecord);
-document.getElementById('btnNew').addEventListener('click', () => {
-  showSetup();
+document.getElementById('btnNew').addEventListener('click', () => { showSetup(); });
+document.getElementById('btnSettings').addEventListener('click', () => { showSetup(); });
+document.getElementById('logoHome').addEventListener('click', () => {
+  // 로고를 누르면 설정창을 닫고 바둑판으로
+  const so = document.getElementById('setupOverlay');
+  if (so) { so.className = 'hidden'; so.innerHTML = ''; }
 });
 document.getElementById('btnResume').addEventListener('click', resumePlay);
 document.getElementById('btnScoreDone').addEventListener('click', calculateScore);
 
 drawBoardBase();
 newGame();
-showSetup();
+showEmptyBoardHint();   // 첫 화면: 빈 바둑판 + "⚙로 새 대국 시작" 안내
 </script>
 </body>
 </html>
