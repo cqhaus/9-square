@@ -37,6 +37,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
     padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
     min-height: 100dvh;
   }
@@ -115,6 +116,42 @@
     margin-top: 12px;
   }
   #playControls { grid-template-columns: 1fr 1fr 1fr; }
+  .wide-btn {
+    width: 100%; max-width: 460px; margin-top: 8px; padding: 8px 0;
+    font-size: 14px; font-weight: 700; color: var(--ink);
+    background: var(--bg-soft); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; cursor: pointer;
+  }
+  .palette {
+    width: 100%; max-width: 460px; margin-top: 8px;
+    display: grid; grid-template-columns: 1fr 1.4fr 1fr; gap: 8px;
+    align-items: stretch;
+  }
+  .palette-wrap { width: 100%; max-width: 460px; }
+  .palette-wrap .palette { grid-template-columns: 1fr 1fr; }
+  .palette-wrap .palette:last-of-type { grid-template-columns: 1fr 1fr 1.2fr; }
+  .pal-label { font-size: 11px; color: var(--ink-dim); margin-top: 10px; text-align: center; letter-spacing: 0.04em; }
+  .pal-stone {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px 0; border-radius: 10px; cursor: pointer;
+    background: var(--bg-soft); border: 2px solid rgba(255,255,255,0.08);
+    color: var(--ink); font-size: 14px; font-weight: 700;
+  }
+  .pal-stone.sel { border-color: var(--accent); background: rgba(63,166,107,0.15); }
+  .pal-txt { font-size: 13px; }
+  .pstone { width: 26px; height: 26px; border-radius: 50%; display: block; }
+  .pstone.black { background: radial-gradient(circle at 35% 30%, #555, #111 70%); }
+  .pstone.white { background: radial-gradient(circle at 35% 30%, #fff, #cfcabd 75%); }
+  .pal-turn {
+    padding: 10px 0; border-radius: 10px; cursor: pointer;
+    background: var(--bg-soft); border: 2px solid rgba(255,255,255,0.08);
+    color: var(--ink); font-size: 14px; font-weight: 700;
+  }
+  .pal-turn.sel { border-color: var(--accent); background: rgba(63,166,107,0.15); }
+  .pal-mid {
+    font-size: 14px; font-weight: 700; color: var(--ink);
+    background: var(--accent); border: none; border-radius: 10px; cursor: pointer;
+  }
   button {
     font: inherit; font-size: 14px; font-weight: 700;
     color: var(--ink);
@@ -233,6 +270,27 @@
   <button id="btnNew">새 대국</button>
 </div>
 
+<button id="btnSetupMode" class="wide-btn">판 놓아보기</button>
+
+<div class="palette-wrap hidden" id="palette">
+  <div class="pal-label">놓을 돌</div>
+  <div class="palette">
+    <button class="pal-stone" id="palBlack" data-c="b" aria-label="흑돌 놓기">
+      <span class="pstone black"></span><span class="pal-txt">흑돌</span>
+    </button>
+    <button class="pal-stone" id="palWhite" data-c="w" aria-label="백돌 놓기">
+      <span class="pstone white"></span><span class="pal-txt">백돌</span>
+    </button>
+  </div>
+  <div class="pal-label">둘 차례 (사활 정답)</div>
+  <div class="palette">
+    <button class="pal-turn" id="palTurnB">흑 선착</button>
+    <button class="pal-turn" id="palTurnW">백 선착</button>
+    <button class="pal-mid" id="palHint">정답 보기</button>
+  </div>
+</div>
+<button id="palExit" class="wide-btn hidden">판 놓아보기 종료</button>
+
 <div class="controls hidden" id="fixControls">
   <button id="btnResume">계속 두기</button>
   <button id="btnScoreDone" class="primary">계가 완료</button>
@@ -300,7 +358,9 @@ async function requestHint() {
   hintLoading = true;
   showToast('KataGo에게 추천 수를 묻는 중…', 2500);
   try {
-    const color = turn === BLACK ? 'b' : 'w';
+    const color = setupMode
+      ? (setupTurn === BLACK ? 'b' : 'w')    // 배치 모드: 선택한 '둘 차례' 색 기준
+      : (turn === BLACK ? 'b' : 'w');
     const res = await fetch(KATAGO_SERVER + '/hint', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -451,10 +511,84 @@ function drawBoardBase() {
 }
 
 function onTap(x, y) {
+  if (setupMode) { setupPlace(x, y); return; }
   if (fixing) { toggleDead(x, y); return; }
   if (aiThinking) return;                                        // AI가 읽는 중
   if (gameMode === 'ai' && turn === aiColor && !gameOver) return; // AI 차례
   tryMove(x, y);
+}
+
+// ---------- 판 놓아보기 (자유 배치) ----------
+let setupMode = false;
+let setupColor = BLACK;   // 지금 놓을 돌 색
+let setupTurn = BLACK;    // 사활 정답을 볼 때 '둘 차례' 색
+
+function enterSetupMode() {
+  setupMode = true;
+  clearHint();
+  clearTimeout(aiTimer);
+  aiThinking = false;
+  gameOver = false;
+  fixing = false;
+  // 빈 판에서 시작
+  board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+  captures = { [BLACK]: 0, [WHITE]: 0 };
+  history = []; redoStack = []; positions = []; gtpMoves = [];
+  lastMove = null; passCount = 0;
+  deadStones = new Set();
+  territoryMarks = [];
+  setupColor = BLACK;
+  setupTurn = BLACK;
+  document.getElementById('playControls').classList.add('hidden');
+  document.getElementById('btnSetupMode').classList.add('hidden');
+  document.getElementById('palette').classList.remove('hidden');
+  document.getElementById('palExit').classList.remove('hidden');
+  updateSetupPalette();
+  renderStones();
+  const label = document.getElementById('turnLabel');
+  if (label) label.innerHTML = '돌을 골라 자유롭게 놓으세요 · 놓인 돌 탭하면 지움';
+}
+
+function exitSetupMode() {
+  setupMode = false;
+  document.getElementById('palette').classList.add('hidden');
+  document.getElementById('palExit').classList.add('hidden');
+  document.getElementById('playControls').classList.remove('hidden');
+  document.getElementById('btnSetupMode').classList.remove('hidden');
+  updateStatus();
+}
+
+function updateSetupPalette() {
+  const b = document.getElementById('palBlack');
+  const w = document.getElementById('palWhite');
+  if (b) b.classList.toggle('sel', setupColor === BLACK);
+  if (w) w.classList.toggle('sel', setupColor === WHITE);
+  const tb = document.getElementById('palTurnB');
+  const tw = document.getElementById('palTurnW');
+  if (tb) tb.classList.toggle('sel', setupTurn === BLACK);
+  if (tw) tw.classList.toggle('sel', setupTurn === WHITE);
+}
+
+// 배치 모드에서 한 점 탭: 빈 자리면 현재 색 놓기, 돌 있으면 지우기
+function setupPlace(x, y) {
+  clearHint();
+  if (board[y][x] !== EMPTY) {
+    board[y][x] = EMPTY;                 // 이미 돌 있으면 지움
+  } else {
+    board[y][x] = setupColor;            // 빈 자리면 현재 색 놓기
+  }
+  // 배치판을 서버 기록으로도 동기화 (힌트/분석용)
+  rebuildGtpFromBoard();
+  renderStones();
+}
+
+// 현재 board 상태를 gtpMoves 목록으로 재구성 (흑 먼저, 그다음 백 — 순서 무관)
+function rebuildGtpFromBoard() {
+  gtpMoves = [];
+  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++)
+    if (board[y][x] === BLACK) gtpMoves.push(['b', toGtp(x, y)]);
+  for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++)
+    if (board[y][x] === WHITE) gtpMoves.push(['w', toGtp(x, y)]);
 }
 
 // ---------- 돌/집 그리기 ----------
@@ -1463,6 +1597,13 @@ function showSetup() {
 document.getElementById('btnUndo').addEventListener('click', undo);
 document.getElementById('btnRedo').addEventListener('click', redo);
 document.getElementById('btnHint').addEventListener('click', toggleHint);
+document.getElementById('btnSetupMode').addEventListener('click', enterSetupMode);
+document.getElementById('palExit').addEventListener('click', exitSetupMode);
+document.getElementById('palBlack').addEventListener('click', () => { setupColor = BLACK; updateSetupPalette(); });
+document.getElementById('palWhite').addEventListener('click', () => { setupColor = WHITE; updateSetupPalette(); });
+document.getElementById('palTurnB').addEventListener('click', () => { setupTurn = BLACK; clearHint(); updateSetupPalette(); });
+document.getElementById('palTurnW').addEventListener('click', () => { setupTurn = WHITE; clearHint(); updateSetupPalette(); });
+document.getElementById('palHint').addEventListener('click', toggleHint);
 document.getElementById('btnScoreReq').addEventListener('click', requestScoring);
 document.getElementById('btnCopyRec').addEventListener('click', copyGameRecord);
 document.getElementById('btnNew').addEventListener('click', () => { showSetup(); });
