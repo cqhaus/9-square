@@ -898,7 +898,7 @@ function showServerResult(scoreStr) {
   });
   document.getElementById('btnNewS').addEventListener('click', () => {
     overlay.className = 'hidden'; overlay.innerHTML = '';
-    showSetup();
+    goHome();
   });
 }
 
@@ -1146,7 +1146,7 @@ function showResult(r) {
   });
   document.getElementById('btnNewFromResult').addEventListener('click', () => {
     closeResult();
-    showSetup();
+    goHome();
   });
 }
 
@@ -1558,7 +1558,7 @@ function aiResign() {
   });
   document.getElementById('btnNewR').addEventListener('click', () => {
     overlay.className = 'hidden'; overlay.innerHTML = '';
-    showSetup();
+    goHome();
   });
 }
 
