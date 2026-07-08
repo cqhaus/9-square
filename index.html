@@ -116,7 +116,7 @@
     margin-top: 12px;
   }
   #playControls { grid-template-columns: 1fr 1fr 1fr; }
-  /* 판 놓아보기 3분할 바 */
+  /* 사활문제 만들기 3분할 바 */
   .setup-bar {
     width: 100%; max-width: 460px; margin-top: 8px;
     display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 8px;
@@ -274,7 +274,7 @@
   <button class="sb-stone" id="palBlack" aria-label="흑돌">
     <span class="pstone black"></span><span class="pal-txt">흑돌</span>
   </button>
-  <button class="sb-mid" id="btnSetupMode">판 놓아보기</button>
+  <button class="sb-mid" id="btnSetupMode">사활문제 만들기</button>
   <button class="sb-stone" id="palWhite" aria-label="백돌">
     <span class="pstone white"></span><span class="pal-txt">백돌</span>
   </button>
@@ -354,11 +354,20 @@ async function requestHint() {
   showToast('KataGo에게 추천 수를 묻는 중…', 2500);
   try {
     const color = turn === BLACK ? 'b' : 'w';
-    const res = await fetch(KATAGO_SERVER + '/hint', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ moves: gtpMoves, color, boardsize: SIZE, komi: KOMI, top: 5 }),
-    });
+    let res;
+    if (tsumegoMode) {
+      res = await fetch(KATAGO_SERVER + '/tsumego_hint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stones: gtpMoves, color, boardsize: SIZE }),
+      });
+    } else {
+      res = await fetch(KATAGO_SERVER + '/hint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moves: gtpMoves, color, boardsize: SIZE, komi: KOMI, top: 5 }),
+      });
+    }
     if (!res.ok) throw new Error('서버 오류 ' + res.status);
     const data = await res.json();
     const cands = data.candidates || [];
@@ -512,19 +521,21 @@ function onTap(x, y) {
   tryMove(x, y);
 }
 
-// ---------- 판 놓아보기 (자유 배치) ----------
+// ---------- 사활문제 만들기 (자유 배치) ----------
 let setupMode = false;
 let setupReady = false;   // 배치를 마치고 흑/백 선택 대기 상태
 let setupColor = BLACK;   // 지금 놓을 돌 색
+let tsumegoMode = false;  // 사활 대국 진행 중 (AI가 국지 생사에 집중)
 
 // 초기 화면(첫 접속 상태)으로 완전 복귀: 기본 AI 대국, 내가 흑
 function goHome() {
   setupMode = false;
   setupReady = false;
+  tsumegoMode = false;
   const sb = document.getElementById('setupBar');
   if (sb) sb.classList.remove('placing');
   const bsm = document.getElementById('btnSetupMode');
-  if (bsm) bsm.textContent = '판 놓아보기';
+  if (bsm) bsm.textContent = '사활문제 만들기';
   gameMode = 'ai';
   aiColor = WHITE;      // 내가 흑, AI가 백
   aiLevel = 3;
@@ -534,7 +545,7 @@ function goHome() {
   maybeScheduleAI();
 }
 
-// 가운데 '판 놓아보기' 버튼: 평소→배치중→배치완료(대국대기) 순환
+// 가운데 버튼: 평소→구성중→완성(대국대기) 순환
 function toggleSetupMode() {
   if (!setupMode && !setupReady) {
     enterSetupMode();              // 평소 → 배치 시작
@@ -553,10 +564,10 @@ function finishPlacing() {
   }
   setupMode = false;
   setupReady = true;
-  document.getElementById('btnSetupMode').textContent = '취소';
+  document.getElementById('btnSetupMode').textContent = '사활문제 완성';
   updateSetupPalette();
   const label = document.getElementById('turnLabel');
-  if (label) label.innerHTML = '◀ 흑돌 / 백돌 ▶ 을 눌러 그 색으로 시작';
+  if (label) label.innerHTML = '선착할 색을 누르세요 · 보통 흑돌 (내가 먼저)';
 }
 
 function enterSetupMode() {
@@ -576,7 +587,7 @@ function enterSetupMode() {
   territoryMarks = [];
   setupColor = BLACK;
   document.getElementById('setupBar').classList.add('placing');
-  document.getElementById('btnSetupMode').textContent = '배치 완료';
+  document.getElementById('btnSetupMode').textContent = '사활문제 구성 중';
   updateSetupPalette();
   renderStones();
   const label = document.getElementById('turnLabel');
@@ -588,7 +599,7 @@ function exitSetupMode() {
   setupMode = false;
   setupReady = false;
   document.getElementById('setupBar').classList.remove('placing');
-  document.getElementById('btnSetupMode').textContent = '판 놓아보기';
+  document.getElementById('btnSetupMode').textContent = '사활문제 만들기';
   updateSetupPalette();
   goHome();       // 초기 화면(기본 대국)으로
 }
@@ -597,8 +608,9 @@ function exitSetupMode() {
 function startFromSetup(firstColor) {
   setupMode = false;
   setupReady = false;
+  tsumegoMode = true;              // 사활 대국: AI가 국지 생사에 집중
   document.getElementById('setupBar').classList.remove('placing');
-  document.getElementById('btnSetupMode').textContent = '판 놓아보기';
+  document.getElementById('btnSetupMode').textContent = '사활문제 만들기';
   updateSetupPalette();
 
   gameMode = 'ai';
@@ -1507,16 +1519,21 @@ async function aiMove() {
   // ----- 서버의 KataGo에게 다음 수를 물어본다 -----
   try {
     const color = aiColor === BLACK ? 'b' : 'w';
-    const res = await fetch(KATAGO_SERVER + '/genmove', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        moves: gtpMoves,
-        color: color,
-        boardsize: SIZE,
-        komi: KOMI,
-      }),
-    });
+    let res;
+    if (tsumegoMode) {
+      // 사활 대국: 바깥 채우기로 AI가 국지 생사에만 집중
+      res = await fetch(KATAGO_SERVER + '/tsumego_move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stones: gtpMoves, color: color, boardsize: SIZE }),
+      });
+    } else {
+      res = await fetch(KATAGO_SERVER + '/genmove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moves: gtpMoves, color: color, boardsize: SIZE, komi: KOMI }),
+      });
+    }
     if (!res.ok) throw new Error('서버 응답 오류 ' + res.status);
     const data = await res.json();
     const mv = data.move;                      // "F6" / "pass" / "resign"
