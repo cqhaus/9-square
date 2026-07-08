@@ -130,6 +130,8 @@
   .palette-wrap { width: 100%; max-width: 460px; }
   .palette-wrap .palette { grid-template-columns: 1fr 1fr; }
   .palette-wrap .palette:last-of-type { grid-template-columns: 1fr 1fr 1.2fr; }
+  .palette-wrap .pal-start { grid-template-columns: 1fr 1fr; }
+  .palette-wrap #palExit { margin-top: 10px; }
   .pal-label { font-size: 11px; color: var(--ink-dim); margin-top: 10px; text-align: center; letter-spacing: 0.04em; }
   .pal-stone {
     display: flex; align-items: center; justify-content: center; gap: 8px;
@@ -273,7 +275,7 @@
 <button id="btnSetupMode" class="wide-btn">판 놓아보기</button>
 
 <div class="palette-wrap hidden" id="palette">
-  <div class="pal-label">놓을 돌</div>
+  <div class="pal-label">놓을 돌 (자유 배치 · 놓인 돌 탭하면 지움)</div>
   <div class="palette">
     <button class="pal-stone" id="palBlack" data-c="b" aria-label="흑돌 놓기">
       <span class="pstone black"></span><span class="pal-txt">흑돌</span>
@@ -282,14 +284,13 @@
       <span class="pstone white"></span><span class="pal-txt">백돌</span>
     </button>
   </div>
-  <div class="pal-label">둘 차례 (사활 정답)</div>
-  <div class="palette">
-    <button class="pal-turn" id="palTurnB">흑 선착</button>
-    <button class="pal-turn" id="palTurnW">백 선착</button>
-    <button class="pal-mid" id="palHint">정답 보기</button>
+  <div class="pal-label">이 판으로 대국 시작 (내가 선착, AI가 상대)</div>
+  <div class="palette pal-start">
+    <button class="pal-turn" id="palStartB">흑으로 시작</button>
+    <button class="pal-turn" id="palStartW">백으로 시작</button>
   </div>
+  <button id="palExit" class="wide-btn">판 놓아보기 취소</button>
 </div>
-<button id="palExit" class="wide-btn hidden">판 놓아보기 종료</button>
 
 <div class="controls hidden" id="fixControls">
   <button id="btnResume">계속 두기</button>
@@ -358,9 +359,7 @@ async function requestHint() {
   hintLoading = true;
   showToast('KataGo에게 추천 수를 묻는 중…', 2500);
   try {
-    const color = setupMode
-      ? (setupTurn === BLACK ? 'b' : 'w')    // 배치 모드: 선택한 '둘 차례' 색 기준
-      : (turn === BLACK ? 'b' : 'w');
+    const color = turn === BLACK ? 'b' : 'w';
     const res = await fetch(KATAGO_SERVER + '/hint', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -521,7 +520,6 @@ function onTap(x, y) {
 // ---------- 판 놓아보기 (자유 배치) ----------
 let setupMode = false;
 let setupColor = BLACK;   // 지금 놓을 돌 색
-let setupTurn = BLACK;    // 사활 정답을 볼 때 '둘 차례' 색
 
 function enterSetupMode() {
   setupMode = true;
@@ -538,24 +536,51 @@ function enterSetupMode() {
   deadStones = new Set();
   territoryMarks = [];
   setupColor = BLACK;
-  setupTurn = BLACK;
   document.getElementById('playControls').classList.add('hidden');
   document.getElementById('btnSetupMode').classList.add('hidden');
   document.getElementById('palette').classList.remove('hidden');
-  document.getElementById('palExit').classList.remove('hidden');
   updateSetupPalette();
   renderStones();
   const label = document.getElementById('turnLabel');
-  if (label) label.innerHTML = '돌을 골라 자유롭게 놓으세요 · 놓인 돌 탭하면 지움';
+  if (label) label.innerHTML = '돌을 놓아 국면을 만드세요';
 }
 
+// 배치 취소 → 원래 대국 화면으로 (아무것도 시작 안 함)
 function exitSetupMode() {
   setupMode = false;
   document.getElementById('palette').classList.add('hidden');
-  document.getElementById('palExit').classList.add('hidden');
   document.getElementById('playControls').classList.remove('hidden');
   document.getElementById('btnSetupMode').classList.remove('hidden');
-  updateStatus();
+  // 배치 전 상태로 되돌리진 않고, 새 대국 설정을 부드럽게 유도
+  showSetup();
+}
+
+// 배치한 국면으로 실제 대국 시작. firstColor = 선착(사람) 색.
+function startFromSetup(firstColor) {
+  // 현재 board(사람이 놓은 국면)를 그대로 두고, 대국 상태로 전환
+  setupMode = false;
+  document.getElementById('palette').classList.add('hidden');
+  document.getElementById('playControls').classList.remove('hidden');
+  document.getElementById('btnSetupMode').classList.remove('hidden');
+
+  gameMode = 'ai';
+  // 사람이 선착 → 사람이 firstColor, AI는 반대 색
+  aiColor = (firstColor === BLACK ? WHITE : BLACK);
+  aiLevel = 3;
+  turn = firstColor;              // 선착 색부터 시작
+  gameOver = false;
+  fixing = false;
+  clearHint();
+  // 배치된 돌을 서버 기록으로 동기화 (이 국면부터 이어서 두도록)
+  rebuildGtpFromBoard();
+  // history 초기화 (이 국면이 시작점)
+  history = []; redoStack = [];
+  positions = [boardString(board)];
+  lastMove = null; passCount = 0;
+  setPlayerNames();
+  renderStones();
+  // 만약 AI가 선착 쪽이 아니면(=사람이 선착) 사람이 먼저 둠. AI 차례면 AI가 둠.
+  maybeScheduleAI();
 }
 
 function updateSetupPalette() {
@@ -563,22 +588,15 @@ function updateSetupPalette() {
   const w = document.getElementById('palWhite');
   if (b) b.classList.toggle('sel', setupColor === BLACK);
   if (w) w.classList.toggle('sel', setupColor === WHITE);
-  const tb = document.getElementById('palTurnB');
-  const tw = document.getElementById('palTurnW');
-  if (tb) tb.classList.toggle('sel', setupTurn === BLACK);
-  if (tw) tw.classList.toggle('sel', setupTurn === WHITE);
 }
 
 // 배치 모드에서 한 점 탭: 빈 자리면 현재 색 놓기, 돌 있으면 지우기
 function setupPlace(x, y) {
-  clearHint();
   if (board[y][x] !== EMPTY) {
     board[y][x] = EMPTY;                 // 이미 돌 있으면 지움
   } else {
     board[y][x] = setupColor;            // 빈 자리면 현재 색 놓기
   }
-  // 배치판을 서버 기록으로도 동기화 (힌트/분석용)
-  rebuildGtpFromBoard();
   renderStones();
 }
 
@@ -1601,9 +1619,8 @@ document.getElementById('btnSetupMode').addEventListener('click', enterSetupMode
 document.getElementById('palExit').addEventListener('click', exitSetupMode);
 document.getElementById('palBlack').addEventListener('click', () => { setupColor = BLACK; updateSetupPalette(); });
 document.getElementById('palWhite').addEventListener('click', () => { setupColor = WHITE; updateSetupPalette(); });
-document.getElementById('palTurnB').addEventListener('click', () => { setupTurn = BLACK; clearHint(); updateSetupPalette(); });
-document.getElementById('palTurnW').addEventListener('click', () => { setupTurn = WHITE; clearHint(); updateSetupPalette(); });
-document.getElementById('palHint').addEventListener('click', toggleHint);
+document.getElementById('palStartB').addEventListener('click', () => startFromSetup(BLACK));
+document.getElementById('palStartW').addEventListener('click', () => startFromSetup(WHITE));
 document.getElementById('btnScoreReq').addEventListener('click', requestScoring);
 document.getElementById('btnCopyRec').addEventListener('click', copyGameRecord);
 document.getElementById('btnNew').addEventListener('click', () => { showSetup(); });
