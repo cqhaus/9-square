@@ -56,7 +56,9 @@
   @media (prefers-reduced-motion: reduce) { .taegeuk { animation: none; } }
   .brand-en { font-size: 18px; font-weight: 800; color: var(--accent); letter-spacing: 0.04em; }
   .top-spacer { height: 8vh; flex-shrink: 0; }
-  .user-rank { font-size: 11px; color: var(--ink-dim); margin-top: 2px; }
+  .center-info { text-align: center; flex: 1; }
+  .user-id { font-size: 16px; font-weight: 800; color: var(--ink); }
+  .user-rank { font-size: 13px; color: var(--ink-dim); margin-top: 2px; font-weight: 700; }
   #userRank.win { color: #35d07f; font-weight: 700; }
   .id-input {
     width: 100%; box-sizing: border-box; margin-top: 4px;
@@ -255,10 +257,13 @@
     <div>
       <div id="nameBlack">흑</div>
       <div class="captures">사석 <b id="capBlack">0</b></div>
-      <div class="user-rank"><span id="userId">CQ_haus</span> · <span id="userRank">Rank —</span></div>
     </div>
   </div>
-  <div class="turn-label" id="turnLabel"><b>흑</b> 차례</div>
+  <div class="center-info">
+    <div class="user-id" id="userId">CQ_haus</div>
+    <div class="user-rank" id="userRank">Rank —</div>
+    <div class="turn-label" id="turnLabel" style="display:none"></div>
+  </div>
   <div class="player white" id="pWhite">
     <div>
       <div id="nameWhite" style="text-align:right">백</div>
