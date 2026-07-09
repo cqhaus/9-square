@@ -50,11 +50,12 @@
     justify-content: space-between;
     padding: 6px 4px 12px;
   }
-  header h1 { font-size: 20px; font-weight: 800; letter-spacing: 0.06em; display: flex; align-items: center; gap: 9px; margin-left: 2ch; }
-  .taegeuk { width: 21px; height: 21px; display: block; animation: spin 5s linear infinite; }
+  header h1 { font-size: 20px; font-weight: 800; letter-spacing: 0.06em; display: flex; align-items: center; gap: 1ch; margin-left: 0; }
+  .taegeuk { width: 21px; height: 21px; display: block; animation: spin 5s linear infinite; margin-left: 1ch; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .taegeuk { animation: none; } }
   .brand-en { font-size: 18px; font-weight: 800; color: var(--accent); letter-spacing: 0.04em; }
+  .brand-right { margin-right: 1ch; }
   .top-spacer { height: 8vh; flex-shrink: 0; }
   .center-info { text-align: center; flex: 1; }
   .user-id { font-size: 16px; font-weight: 800; color: var(--ink); }
@@ -231,7 +232,7 @@
 <div class="top-spacer"></div>
 
 <header>
-  <h1 id="logoHome" title="바둑판으로">아홉
+  <h1 id="logoHome" title="바둑판으로">아홉줄 바둑
     <svg class="taegeuk" viewBox="0 0 100 100" aria-hidden="true">
       <circle cx="50" cy="50" r="48" fill="#f2f0ea"/>
       <path d="M50 2 a48 48 0 0 1 0 96 a24 24 0 0 1 0 -48 a24 24 0 0 0 0 -48 z" fill="#1b1b1b"/>
@@ -283,7 +284,7 @@
   <button id="btnHint">힌트</button>
   <button id="btnScoreReq" class="primary">계가</button>
   <button id="btnCopyRec" title="진단용 대국 기록 복사">기록</button>
-  <button id="btnNew">새 대국</button>
+  <button id="btnNew" class="primary">새 대국</button>
 </div>
 
 <div class="setup-bar" id="setupBar">
@@ -297,7 +298,7 @@
 </div>
 
 <div class="rank-record" id="rankRecord">
-  <span class="rr-label">Rank Record</span>
+  <span class="rr-label">Score Record</span>
   <span class="rr-list" id="rrList">—</span>
 </div>
 
@@ -354,6 +355,7 @@ function fromGtp(s) {
 
 // ---------- 힌트 (KataGo 추천 수 표시) ----------
 let hintLoading = false;
+let hintUsedThisGame = false;   // 이번 대국에서 힌트를 썼는지 (Rank 제외용)
 function clearHint() {
   if (hintMarks.length) { hintMarks = []; if (typeof renderStones === 'function') renderStones(); }
 }
@@ -382,6 +384,7 @@ async function requestHint() {
       const p = fromGtp(c.move);
       return { x: p.x, y: p.y, best: c.order === 0 };
     }).filter(h => h.x >= 0 && h.x < SIZE && h.y >= 0 && h.y < SIZE);
+    hintUsedThisGame = true;     // 이번 대국에서 힌트 사용함 → Rank(최고성적) 제외
     renderStones();
   } catch (e) {
     showToast('AI 서버에 연결할 수 없습니다');
@@ -935,7 +938,7 @@ async function saveRankScore(score) {
     const res = await fetch(KATAGO_SERVER + '/rank_add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user, score }),
+      body: JSON.stringify({ user, score, hint: hintUsedThisGame }),
     });
     if (res.ok) {
       const data = await res.json();
@@ -1336,6 +1339,7 @@ function newGame() {
   clearTimeout(aiTimer);
   aiThinking = false;
   aiLowStreak = 0;
+  hintUsedThisGame = false;   // 힌트 사용 여부 초기화
   gtpMoves = [];          // 서버용 착수 기록 초기화
   board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
   turn = BLACK;
