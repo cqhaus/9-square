@@ -46,16 +46,27 @@
     width: 100%;
     max-width: 460px;
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
     padding: 6px 4px 12px;
+    position: relative;
   }
-  header h1 { font-size: 20px; font-weight: 800; letter-spacing: 0.06em; display: flex; align-items: center; gap: 1ch; margin-left: 0; }
-  .taegeuk { width: 21px; height: 21px; display: block; animation: spin 5s linear infinite; margin-left: 1ch; }
+  #logoSpin {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 21px; height: 21px;
+    margin: -10.5px 0 0 -10.5px;
+    animation: spinC 5s linear infinite;
+  }
+  @keyframes spinC { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { #logoSpin { animation: none; } }
+  header h1 { font-size: 20px; font-weight: 800; letter-spacing: 0.06em; margin-left: 1ch; }
+  .taegeuk { width: 21px; height: 21px; display: block; animation: spin 5s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .taegeuk { animation: none; } }
   .brand-en { font-size: 18px; font-weight: 800; color: var(--accent); letter-spacing: 0.04em; }
-  .brand-right { margin-right: 1ch; }
+  .brand-right { margin-right: 1ch; display: flex; align-items: center; gap: 10px; }
   .top-spacer { height: 8vh; flex-shrink: 0; }
   .center-info { text-align: center; flex: 1; }
   .user-id { font-size: 16px; font-weight: 800; color: var(--ink); }
@@ -68,7 +79,7 @@
     color: var(--ink); font-size: 15px; font-weight: 600; text-align: center;
   }
   .brand-right { display: flex; align-items: center; gap: 10px; }
-  #logoHome { cursor: pointer; }
+  #logoHome, #logoSpin { cursor: pointer; }
   .gear {
     background: none; border: none; padding: 4px; margin: 0;
     color: var(--ink-dim); cursor: pointer; display: flex; align-items: center;
@@ -161,7 +172,7 @@
     background: var(--bg-soft); border: 1px solid rgba(255,255,255,0.06);
   }
   .rr-label { font-size: 12px; color: var(--ink-dim); font-weight: 700; white-space: nowrap; }
-  .rr-list { font-size: 15px; font-weight: 700; letter-spacing: 0.02em; color: var(--ink); }
+  .rr-list { font-size: 14px; font-weight: 700; letter-spacing: 0.01em; color: var(--ink); line-height: 1.5; }
   .rr-win { color: #35d07f; }   /* 이긴 기록은 초록 */
   button {
     font: inherit; font-size: 14px; font-weight: 700;
@@ -232,15 +243,14 @@
 <div class="top-spacer"></div>
 
 <header>
-  <h1 id="logoHome" title="바둑판으로">아홉줄 바둑
-    <svg class="taegeuk" viewBox="0 0 100 100" aria-hidden="true">
-      <circle cx="50" cy="50" r="48" fill="#f2f0ea"/>
-      <path d="M50 2 a48 48 0 0 1 0 96 a24 24 0 0 1 0 -48 a24 24 0 0 0 0 -48 z" fill="#1b1b1b"/>
-      <circle cx="50" cy="26" r="8" fill="#f2f0ea"/>
-      <circle cx="50" cy="74" r="8" fill="#1b1b1b"/>
-      <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>
-    </svg>
-  </h1>
+  <h1 id="logoHome" title="바둑판으로">아홉줄 바둑</h1>
+  <svg class="taegeuk" id="logoSpin" viewBox="0 0 100 100" aria-hidden="true">
+    <circle cx="50" cy="50" r="48" fill="#f2f0ea"/>
+    <path d="M50 2 a48 48 0 0 1 0 96 a24 24 0 0 1 0 -48 a24 24 0 0 0 0 -48 z" fill="#1b1b1b"/>
+    <circle cx="50" cy="26" r="8" fill="#f2f0ea"/>
+    <circle cx="50" cy="74" r="8" fill="#1b1b1b"/>
+    <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>
+  </svg>
   <div class="brand-right">
     <div class="brand-en">9_Square</div>
     <button id="btnSettings" class="gear" title="새 대국 설정" aria-label="설정">
@@ -947,7 +957,7 @@ async function saveRankScore(score) {
   } catch (e) { /* 서버 연결 실패 시 조용히 무시 */ }
 }
 
-// 최근 6개 기록과 최고 성적을 화면에 표시
+// 최근 10개 기록과 최고 성적을 화면에 표시
 function renderRank(history, best) {
   const listEl = document.getElementById('rrList');
   if (listEl) {
@@ -1760,11 +1770,12 @@ document.getElementById('btnScoreReq').addEventListener('click', requestScoring)
 document.getElementById('btnCopyRec').addEventListener('click', copyGameRecord);
 document.getElementById('btnNew').addEventListener('click', goHome);
 document.getElementById('btnSettings').addEventListener('click', () => { showSetup(); });
-document.getElementById('logoHome').addEventListener('click', () => {
-  // 로고를 누르면 설정창을 닫고 바둑판으로
+function goToBoard() {
   const so = document.getElementById('setupOverlay');
   if (so) { so.className = 'hidden'; so.innerHTML = ''; }
-});
+}
+document.getElementById('logoHome').addEventListener('click', goToBoard);
+document.getElementById('logoSpin').addEventListener('click', goToBoard);
 document.getElementById('btnResume').addEventListener('click', resumePlay);
 document.getElementById('btnScoreDone').addEventListener('click', calculateScore);
 
