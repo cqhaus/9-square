@@ -37,7 +37,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
     min-height: 100dvh;
   }
@@ -55,6 +55,15 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .taegeuk { animation: none; } }
   .brand-en { font-size: 18px; font-weight: 800; color: var(--accent); letter-spacing: 0.04em; }
+  .top-spacer { height: 8vh; flex-shrink: 0; }
+  .user-rank { font-size: 11px; color: var(--ink-dim); margin-top: 2px; }
+  #userRank.win { color: #35d07f; font-weight: 700; }
+  .id-input {
+    width: 100%; box-sizing: border-box; margin-top: 4px;
+    padding: 10px 12px; border-radius: 10px;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+    color: var(--ink); font-size: 15px; font-weight: 600; text-align: center;
+  }
   .brand-right { display: flex; align-items: center; gap: 10px; }
   #logoHome { cursor: pointer; }
   .gear {
@@ -116,7 +125,7 @@
     margin-top: 12px;
   }
   #playControls { grid-template-columns: 1fr 1fr 1fr; }
-  /* 사활문제 만들기 3분할 바 */
+  /* 판 놓아보기 3분할 바 */
   .setup-bar {
     width: 100%; max-width: 460px; margin-top: 8px;
     display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 8px;
@@ -141,17 +150,16 @@
   .pstone { width: 24px; height: 24px; border-radius: 50%; display: block; }
   .pstone.black { background: radial-gradient(circle at 35% 30%, #555, #111 70%); }
   .pstone.white { background: radial-gradient(circle at 35% 30%, #fff, #cfcabd 75%); }
-  /* 사활 문제집 버튼 */
-  .tsumego-bar {
+  /* Rank Record 줄 */
+  .rank-record {
     width: 100%; max-width: 460px; margin-top: 8px;
-    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
-  }
-  .tsu-btn {
-    padding: 9px 0; border-radius: 10px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 10px;
     background: var(--bg-soft); border: 1px solid rgba(255,255,255,0.06);
-    color: var(--ink-dim); font-size: 13px; font-weight: 600;
-    opacity: 0.5; cursor: default;
   }
+  .rr-label { font-size: 12px; color: var(--ink-dim); font-weight: 700; white-space: nowrap; }
+  .rr-list { font-size: 15px; font-weight: 700; letter-spacing: 0.02em; color: var(--ink); }
+  .rr-win { color: #35d07f; }   /* 이긴 기록은 초록 */
   button {
     font: inherit; font-size: 14px; font-weight: 700;
     color: var(--ink);
@@ -218,6 +226,8 @@
 </head>
 <body>
 
+<div class="top-spacer"></div>
+
 <header>
   <h1 id="logoHome" title="바둑판으로">아홉
     <svg class="taegeuk" viewBox="0 0 100 100" aria-hidden="true">
@@ -245,6 +255,7 @@
     <div>
       <div id="nameBlack">흑</div>
       <div class="captures">사석 <b id="capBlack">0</b></div>
+      <div class="user-rank"><span id="userId">CQ_haus</span> · <span id="userRank">Rank —</span></div>
     </div>
   </div>
   <div class="turn-label" id="turnLabel"><b>흑</b> 차례</div>
@@ -274,16 +285,15 @@
   <button class="sb-stone" id="palBlack" aria-label="흑돌">
     <span class="pstone black"></span><span class="pal-txt">흑돌</span>
   </button>
-  <button class="sb-mid" id="btnSetupMode">사활문제 만들기</button>
+  <button class="sb-mid" id="btnSetupMode">판 놓아보기</button>
   <button class="sb-stone" id="palWhite" aria-label="백돌">
     <span class="pstone white"></span><span class="pal-txt">백돌</span>
   </button>
 </div>
 
-<div class="tsumego-bar">
-  <button class="tsu-btn" disabled>사활 초급</button>
-  <button class="tsu-btn" disabled>사활 중급</button>
-  <button class="tsu-btn" disabled>사활 고급</button>
+<div class="rank-record" id="rankRecord">
+  <span class="rr-label">Rank Record</span>
+  <span class="rr-list" id="rrList">—</span>
 </div>
 
 <div class="controls hidden" id="fixControls">
@@ -354,20 +364,11 @@ async function requestHint() {
   showToast('KataGo에게 추천 수를 묻는 중…', 2500);
   try {
     const color = turn === BLACK ? 'b' : 'w';
-    let res;
-    if (tsumegoMode) {
-      res = await fetch(KATAGO_SERVER + '/tsumego_hint', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stones: gtpMoves, color, boardsize: SIZE }),
-      });
-    } else {
-      res = await fetch(KATAGO_SERVER + '/hint', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ moves: gtpMoves, color, boardsize: SIZE, komi: KOMI, top: 5 }),
-      });
-    }
+    const res = await fetch(KATAGO_SERVER + '/hint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ moves: gtpMoves, color, boardsize: SIZE, komi: KOMI, top: 5 }),
+    });
     if (!res.ok) throw new Error('서버 오류 ' + res.status);
     const data = await res.json();
     const cands = data.candidates || [];
@@ -521,21 +522,19 @@ function onTap(x, y) {
   tryMove(x, y);
 }
 
-// ---------- 사활문제 만들기 (자유 배치) ----------
+// ---------- 판 놓아보기 (자유 배치) ----------
 let setupMode = false;
 let setupReady = false;   // 배치를 마치고 흑/백 선택 대기 상태
 let setupColor = BLACK;   // 지금 놓을 돌 색
-let tsumegoMode = false;  // 사활 대국 진행 중 (AI가 국지 생사에 집중)
 
 // 초기 화면(첫 접속 상태)으로 완전 복귀: 기본 AI 대국, 내가 흑
 function goHome() {
   setupMode = false;
   setupReady = false;
-  tsumegoMode = false;
   const sb = document.getElementById('setupBar');
   if (sb) sb.classList.remove('placing');
   const bsm = document.getElementById('btnSetupMode');
-  if (bsm) bsm.textContent = '사활문제 만들기';
+  if (bsm) bsm.textContent = '판 놓아보기';
   gameMode = 'ai';
   aiColor = WHITE;      // 내가 흑, AI가 백
   aiLevel = 3;
@@ -564,7 +563,7 @@ function finishPlacing() {
   }
   setupMode = false;
   setupReady = true;
-  document.getElementById('btnSetupMode').textContent = '사활문제 완성';
+  document.getElementById('btnSetupMode').textContent = '흑◀ ▶백 선택';
   updateSetupPalette();
   const label = document.getElementById('turnLabel');
   if (label) label.innerHTML = '선착할 색을 누르세요 · 보통 흑돌 (내가 먼저)';
@@ -587,7 +586,7 @@ function enterSetupMode() {
   territoryMarks = [];
   setupColor = BLACK;
   document.getElementById('setupBar').classList.add('placing');
-  document.getElementById('btnSetupMode').textContent = '사활문제 구성 중';
+  document.getElementById('btnSetupMode').textContent = '판 구성 중';
   updateSetupPalette();
   renderStones();
   const label = document.getElementById('turnLabel');
@@ -599,7 +598,7 @@ function exitSetupMode() {
   setupMode = false;
   setupReady = false;
   document.getElementById('setupBar').classList.remove('placing');
-  document.getElementById('btnSetupMode').textContent = '사활문제 만들기';
+  document.getElementById('btnSetupMode').textContent = '판 놓아보기';
   updateSetupPalette();
   goHome();       // 초기 화면(기본 대국)으로
 }
@@ -608,9 +607,8 @@ function exitSetupMode() {
 function startFromSetup(firstColor) {
   setupMode = false;
   setupReady = false;
-  tsumegoMode = true;              // 사활 대국: AI가 국지 생사에 집중
   document.getElementById('setupBar').classList.remove('placing');
-  document.getElementById('btnSetupMode').textContent = '사활문제 만들기';
+  document.getElementById('btnSetupMode').textContent = '판 놓아보기';
   updateSetupPalette();
 
   gameMode = 'ai';
@@ -912,6 +910,73 @@ function showServerResult(scoreStr) {
     overlay.className = 'hidden'; overlay.innerHTML = '';
     goHome();
   });
+
+  // ----- Rank Record 갱신 -----
+  // 내 돌 색 기준으로 이겼는지/졌는지 + 집수차 계산
+  if (winner !== null && diff) {
+    const myColorChar = (aiColor === BLACK) ? '백' : '흑';   // 내 돌 = AI 반대색
+    const margin = parseFloat(diff);                          // 집수차 (양수)
+    const iWon = (winner === myColorChar);
+    // 진 경우: 양수(진 집수, 소수점 버림). 이긴 경우: 음수(이긴 집수).
+    const rankScore = iWon ? -Math.floor(margin) : Math.floor(margin);
+    saveRankScore(rankScore);
+  }
+}
+
+// Rank 점수를 서버에 저장하고 표시 갱신
+async function saveRankScore(score) {
+  const user = (document.getElementById('userId').textContent || 'CQ_haus').trim();
+  try {
+    const res = await fetch(KATAGO_SERVER + '/rank_add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, score }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      renderRank(data.history, data.best);
+    }
+  } catch (e) { /* 서버 연결 실패 시 조용히 무시 */ }
+}
+
+// 최근 6개 기록과 최고 성적을 화면에 표시
+function renderRank(history, best) {
+  const listEl = document.getElementById('rrList');
+  if (listEl) {
+    if (!history || !history.length) {
+      listEl.textContent = '—';
+    } else {
+      // 각 점수: 양수=진 집수(그냥), 음수=이긴 집수(초록 +N)
+      listEl.innerHTML = history.map(s =>
+        s < 0 ? `<span class="rr-win">+${-s}</span>` : `${s}`
+      ).join(' - ');
+    }
+  }
+  const rankEl = document.getElementById('userRank');
+  if (rankEl) {
+    if (best === null || best === undefined) {
+      rankEl.textContent = 'Rank —';
+      rankEl.classList.remove('win');
+    } else if (best < 0) {
+      rankEl.textContent = `Rank +${-best}`;
+      rankEl.classList.add('win');
+    } else {
+      rankEl.textContent = `Rank ${best}`;
+      rankEl.classList.remove('win');
+    }
+  }
+}
+
+// 앱 시작 시 저장된 Rank 불러오기
+async function loadRank() {
+  const user = (document.getElementById('userId').textContent || 'CQ_haus').trim();
+  try {
+    const res = await fetch(KATAGO_SERVER + '/rank_get?user=' + encodeURIComponent(user));
+    if (res.ok) {
+      const data = await res.json();
+      renderRank(data.history, data.best);
+    }
+  } catch (e) { /* 무시 */ }
 }
 
 /* ============================================================
@@ -1519,21 +1584,11 @@ async function aiMove() {
   // ----- 서버의 KataGo에게 다음 수를 물어본다 -----
   try {
     const color = aiColor === BLACK ? 'b' : 'w';
-    let res;
-    if (tsumegoMode) {
-      // 사활 대국: 바깥 채우기로 AI가 국지 생사에만 집중
-      res = await fetch(KATAGO_SERVER + '/tsumego_move', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stones: gtpMoves, color: color, boardsize: SIZE }),
-      });
-    } else {
-      res = await fetch(KATAGO_SERVER + '/genmove', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ moves: gtpMoves, color: color, boardsize: SIZE, komi: KOMI }),
-      });
-    }
+    const res = await fetch(KATAGO_SERVER + '/genmove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ moves: gtpMoves, color: color, boardsize: SIZE, komi: KOMI }),
+    });
     if (!res.ok) throw new Error('서버 응답 오류 ' + res.status);
     const data = await res.json();
     const mv = data.move;                      // "F6" / "pass" / "resign"
@@ -1606,6 +1661,9 @@ function showSetup() {
     const aiRows = selMode === 'ai' ? '' : ' style="display:none"';
     overlay.innerHTML = '<div class="result-card">'
       + '<h2>새 <span>대국</span></h2>'
+      + '<div class="opt-label">사용자 아이디</div>'
+      + '<input type="text" id="userIdInput" class="id-input" maxlength="16" value="'
+      + (document.getElementById('userId').textContent || 'CQ_haus').replace(/"/g, '') + '">'
       + '<div class="opt-label">대국 상대</div>'
       + '<div class="opt-row">'
       + '<button class="opt' + (selMode === 'ai' ? ' sel' : '') + '" data-k="mode" data-v="ai">AI와 대국</button>'
@@ -1656,6 +1714,16 @@ function showSetup() {
   }
 
   function startGame() {
+    // 사용자 아이디 저장
+    const idInput = document.getElementById('userIdInput');
+    if (idInput) {
+      const newId = idInput.value.trim() || 'CQ_haus';
+      const idEl = document.getElementById('userId');
+      if (idEl && idEl.textContent !== newId) {
+        idEl.textContent = newId;
+        loadRank();     // 아이디 바뀌면 그 사람 기록 불러오기
+      }
+    }
     gameMode = selMode;
     KOMI = selKomi;
     handicap = selHandi;
@@ -1693,6 +1761,7 @@ document.getElementById('btnScoreDone').addEventListener('click', calculateScore
 
 drawBoardBase();
 goHome();
+loadRank();
 </script>
 </body>
 </html>
