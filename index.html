@@ -532,7 +532,7 @@ function drawBoardBase() {
 }
 
 function onTap(x, y) {
-  if (setupMode) { setupPlace(x, y); return; }
+  if (setupMode || readingMode) { setupPlace(x, y); return; }
   if (setupReady) { showToast('흑돌/백돌을 눌러 대국을 시작하세요'); return; }
   if (fixing) { toggleDead(x, y); return; }
   if (aiThinking) return;                                        // AI가 읽는 중
@@ -544,6 +544,14 @@ function onTap(x, y) {
 let setupMode = false;
 let setupReady = false;   // 배치를 마치고 흑/백 선택 대기 상태
 let setupColor = BLACK;   // 지금 놓을 돌 색
+let readingMode = false;  // 대국 중 수읽기(변화도) 모드
+let readingSnapshot = null;  // 수읽기 진입 전 대국 상태 저장
+
+// 대국이 실제로 진행 중인지 (돌이 하나라도 놓였고 아직 안 끝남)
+function isGameInProgress() {
+  if (gameOver) return false;
+  return board.some(row => row.some(v => v !== EMPTY));
+}
 
 // 초기 화면(첫 접속 상태)으로 완전 복귀: 기본 AI 대국, 내가 흑
 function goHome() {
@@ -564,13 +572,80 @@ function goHome() {
 
 // 가운데 버튼: 평소→구성중→완성(대국대기) 순환
 function toggleSetupMode() {
+  // 수읽기 모드 중이면 → 원래 대국으로 복귀
+  if (readingMode) {
+    exitReadingMode();
+    return;
+  }
+  // 대국 진행 중에 눌렀으면 → 수읽기 모드 진입 (현재 판 유지)
+  if (!setupMode && !setupReady && isGameInProgress()) {
+    enterReadingMode();
+    return;
+  }
+  // 그 외(초기 화면 등)는 기존 흐름
   if (!setupMode && !setupReady) {
-    enterSetupMode();              // 평소 → 배치 시작
+    enterSetupMode();              // 평소 → 빈 판 배치 시작
   } else if (setupMode) {
     finishPlacing();               // 배치 중 → 배치 완료(흑/백 골라 시작 대기)
   } else {
     exitSetupMode();               // 배치 완료 상태에서 다시 누르면 취소→홈
   }
+}
+
+// 대국 중 수읽기 진입: 현재 상태를 저장하고 자유 배치 모드로
+function enterReadingMode() {
+  readingSnapshot = {
+    board: board.map(row => row.slice()),
+    turn: turn,
+    captures: { [BLACK]: captures[BLACK], [WHITE]: captures[WHITE] },
+    history: history.slice(),
+    redoStack: redoStack.slice(),
+    positions: positions.slice(),
+    gtpMoves: gtpMoves.map(m => m.slice()),
+    lastMove: lastMove,
+    passCount: passCount,
+    gameMode: gameMode,
+    aiColor: aiColor,
+  };
+  readingMode = true;
+  setupColor = BLACK;
+  clearHint();
+  clearTimeout(aiTimer);
+  aiThinking = false;
+  document.getElementById('setupBar').classList.add('placing');
+  document.getElementById('btnSetupMode').textContent = '판 구성 중';
+  updateSetupPalette();
+  renderStones();
+  const label = document.getElementById('turnLabel');
+  if (label) { label.style.display = ''; label.innerHTML = '수읽기 중 · 자유로 놓아보세요 (마치면 대국 복귀)'; }
+}
+
+// 수읽기 종료: 저장한 대국 상태로 복귀
+function exitReadingMode() {
+  if (readingSnapshot) {
+    board = readingSnapshot.board.map(row => row.slice());
+    turn = readingSnapshot.turn;
+    captures = { [BLACK]: readingSnapshot.captures[BLACK], [WHITE]: readingSnapshot.captures[WHITE] };
+    history = readingSnapshot.history.slice();
+    redoStack = readingSnapshot.redoStack.slice();
+    positions = readingSnapshot.positions.slice();
+    gtpMoves = readingSnapshot.gtpMoves.map(m => m.slice());
+    lastMove = readingSnapshot.lastMove;
+    passCount = readingSnapshot.passCount;
+    gameMode = readingSnapshot.gameMode;
+    aiColor = readingSnapshot.aiColor;
+  }
+  readingSnapshot = null;
+  readingMode = false;
+  document.getElementById('setupBar').classList.remove('placing');
+  document.getElementById('btnSetupMode').textContent = '판 놓아보기';
+  updateSetupPalette();
+  clearHint();
+  const label = document.getElementById('turnLabel');
+  if (label) label.style.display = 'none';
+  renderStones();
+  if (typeof updateStatus === 'function') updateStatus();
+  maybeScheduleAI();   // 복귀 시 AI 차례면 이어서 두도록
 }
 
 let setupReady_removed_dup = false;
@@ -647,7 +722,7 @@ function startFromSetup(firstColor) {
 
 // 흑돌/백돌 버튼: 배치 중=색 선택, 배치 완료=그 색으로 대국 시작
 function onStoneButton(color) {
-  if (setupMode) {
+  if (setupMode || readingMode) {
     setupColor = color;
     updateSetupPalette();
   } else if (setupReady) {
@@ -658,8 +733,9 @@ function onStoneButton(color) {
 function updateSetupPalette() {
   const b = document.getElementById('palBlack');
   const w = document.getElementById('palWhite');
-  if (b) b.classList.toggle('sel', setupMode && setupColor === BLACK);
-  if (w) w.classList.toggle('sel', setupMode && setupColor === WHITE);
+  const active = setupMode || readingMode;
+  if (b) b.classList.toggle('sel', active && setupColor === BLACK);
+  if (w) w.classList.toggle('sel', active && setupColor === WHITE);
 }
 
 // 배치 모드에서 한 점 탭: 빈 자리면 현재 색 놓기, 돌 있으면 지우기
