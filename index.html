@@ -948,7 +948,12 @@ async function saveRankScore(score) {
     const res = await fetch(KATAGO_SERVER + '/rank_add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user, score, hint: hintUsedThisGame }),
+      body: JSON.stringify({
+        user, score,
+        hint: hintUsedThisGame,
+        handicap: (handicap && handicap >= 2) ? true : false,
+        komi_changed: (KOMI !== 6.5),
+      }),
     });
     if (res.ok) {
       const data = await res.json();
