@@ -957,7 +957,7 @@ async function saveRankScore(score) {
   } catch (e) { /* 서버 연결 실패 시 조용히 무시 */ }
 }
 
-// 최근 10개 기록과 최고 성적을 화면에 표시
+// 최근 12개 기록과 최고 성적을 화면에 표시
 function renderRank(history, best) {
   const listEl = document.getElementById('rrList');
   if (listEl) {
