@@ -139,6 +139,7 @@
     margin-top: 12px;
   }
   #playControls { grid-template-columns: 1fr 1fr 1fr; }
+  #replayControls { grid-template-columns: 1fr 1fr 1fr; }
   /* 판 놓아보기 3분할 바 */
   .setup-bar {
     width: 100%; max-width: 460px; margin-top: 8px;
@@ -293,7 +294,7 @@
   <button id="btnRedo" title="한 수 앞으로">=&gt;</button>
   <button id="btnHint">힌트</button>
   <button id="btnScoreReq" class="primary">계가</button>
-  <button id="btnCopyRec" title="진단용 대국 기록 복사">기록</button>
+  <button id="btnCopyRec" title="저장된 기보 보기">기록</button>
   <button id="btnNew" class="primary">새 대국</button>
 </div>
 
@@ -315,6 +316,12 @@
 <div class="controls hidden" id="fixControls">
   <button id="btnResume">계속 두기</button>
   <button id="btnScoreDone" class="primary">계가 완료</button>
+</div>
+
+<div class="controls hidden" id="replayControls">
+  <button id="btnRpPrev">◀ 이전</button>
+  <button id="btnRpNext">다음 ▶</button>
+  <button id="btnRpClose" class="primary">복기 종료</button>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -532,6 +539,7 @@ function drawBoardBase() {
 }
 
 function onTap(x, y) {
+  if (replayMode) return;                                        // 복기 중엔 착수 금지
   if (setupMode || readingMode) { setupPlace(x, y); return; }
   if (setupReady) { showToast('흑돌/백돌을 눌러 대국을 시작하세요'); return; }
   if (fixing) { toggleDead(x, y); return; }
@@ -576,6 +584,7 @@ function goHome() {
 
 // 가운데 버튼: 평소→구성중→흑백선택 순환
 function toggleSetupMode() {
+  if (replayMode) { showToast('복기 중에는 사용할 수 없습니다'); return; }
   if (!setupMode && !setupReady) {
     enterSetupMode();              // 배치 시작 (대국 중이면 현재 판 유지)
   } else if (setupMode) {
@@ -610,7 +619,7 @@ function enterSetupMode() {
   updateSetupPalette();
   renderStones();
   const label = document.getElementById('turnLabel');
-  if (label) { label.style.display = ''; label.innerHTML = '돌을 놓아 국면을 만드세요 · 놓인 돌 탭하면 지움'; }
+  if (label) label.style.display = 'none';   // 배치 중 안내 문구는 표시하지 않음
 }
 
 function finishPlacing() {
@@ -774,6 +783,14 @@ function updateStatus() {
   document.getElementById('pBlack').classList.toggle('turn', !gameOver && turn === BLACK);
   document.getElementById('pWhite').classList.toggle('turn', !gameOver && turn === WHITE);
   const label = document.getElementById('turnLabel');
+  // 복기 중: 몇 수째인지 표시하고 대국 버튼은 숨김
+  if (replayMode) {
+    label.style.display = '';
+    label.innerHTML = '복기 <b>' + replayIndex + '</b> / ' + replayMoves.length + '수';
+    document.getElementById('playControls').classList.add('hidden');
+    document.getElementById('fixControls').classList.add('hidden');
+    return;
+  }
   // 배치/놓아보기 중에는 안내 문구를 유지 (덮어쓰지 않음)
   if (setupMode || setupReady) {
     document.getElementById('playControls').classList.toggle('hidden', fixing);
@@ -860,6 +877,7 @@ function tryMove(x, y) {
   lastMove = { x, y };
   passCount = 0;
   gtpMoves.push([turn === BLACK ? 'b' : 'w', toGtp(x, y)]);
+  gameSavedOnce = false; // 수가 새로 놓였으니 다음 계가 때 새 기보로 저장
   redoStack = [];        // 새 수를 뒀으니 앞으로가기(redo) 기록은 무효
   clearHint();
   turn = enemy;
@@ -970,6 +988,9 @@ function showServerResult(scoreStr) {
     goHome();
   });
 
+  // ----- 기보 자동 저장 -----
+  saveGameToLocal(winner ? (winner + ' ' + diff + '집 승') : '무승부');
+
   // ----- Rank Record 갱신 -----
   // 내 돌 색 기준으로 이겼는지/졌는지 + 집수차 계산
   if (winner !== null && diff) {
@@ -1041,6 +1062,155 @@ async function loadRank() {
       renderRank(data.history, data.best);
     }
   } catch (e) { /* 무시 */ }
+}
+
+/* ============================================================
+   기보 저장 & 복기 (v6 신규)
+   대국이 끝나면 기보를 폰 안(localStorage)에 자동 저장한다.
+   [기록] 버튼 → 저장된 기보 목록 → 선택하면 바둑판 위에서
+   ◀ ▶ 버튼으로 한 수씩 돌려볼 수 있다.
+   폰 안에 저장되므로 노트북 서버가 꺼져 있어도 동작한다.
+   ============================================================ */
+const SAVE_KEY = 'nine_square_games';
+const MAX_SAVED = 20;              // 최근 20판까지 보관
+let gameSavedOnce = false;         // 이번 대국을 이미 저장했는지 (판정 수정 시 중복 방지)
+let replayMode = false;            // 지금 복기 화면인지
+let replayMoves = [];              // 복기 중인 기보의 착수 목록
+let replayIndex = 0;               // 지금 몇 수까지 보여주는지 (0 = 빈 판)
+
+// 저장된 기보 목록 읽기 (실패하면 빈 목록)
+function loadSavedGames() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) { return []; }
+}
+
+// 대국이 끝났을 때 기보 저장. 같은 대국의 결과가 바뀌면(판정 수정) 결과만 갱신.
+function saveGameToLocal(resultText) {
+  if (!gtpMoves || !gtpMoves.length) return;
+  const games = loadSavedGames();
+  if (gameSavedOnce && games.length) {
+    games[0].result = resultText || games[0].result;
+  } else {
+    games.unshift({
+      date: new Date().toISOString(),
+      komi: KOMI,
+      handicap: handicap,
+      myColor: (gameMode === 'ai') ? (aiColor === BLACK ? '백' : '흑') : '둘이서',
+      result: resultText || '',
+      moves: gtpMoves.slice(),
+    });
+    while (games.length > MAX_SAVED) games.pop();
+    gameSavedOnce = true;
+  }
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(games)); } catch (e) { /* 저장 실패는 무시 */ }
+}
+
+// [기록] 버튼: 저장된 기보 목록을 띄운다
+function showRecordList() {
+  const games = loadSavedGames();
+  const overlay = document.getElementById('resultOverlay');
+  overlay.className = 'result-overlay';
+  let rows;
+  if (!games.length) {
+    rows = '<div class="detail">저장된 기보가 없습니다.<br>대국을 끝까지 두면 자동으로 저장됩니다.</div>';
+  } else {
+    rows = '<div style="max-height:300px;overflow-y:auto;margin-top:12px">'
+      + games.map((g, i) => {
+          const d = new Date(g.date);
+          const dateStr = (d.getMonth() + 1) + '/' + d.getDate() + ' '
+            + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+          const extra = (g.myColor && g.myColor !== '둘이서') ? ' · 내 돌 ' + g.myColor : '';
+          return '<button class="rec-item" data-i="' + i + '" '
+            + 'style="width:100%;text-align:left;margin-bottom:6px;padding:11px 12px;font-size:13px">'
+            + '<b>' + dateStr + '</b> · ' + g.moves.length + '수 · ' + (g.result || '결과 없음') + extra
+            + '</button>';
+        }).join('') + '</div>';
+  }
+  overlay.innerHTML = '<div class="result-card"><h2>저장된 <span>기보</span></h2>'
+    + rows
+    + '<div class="btns" style="grid-template-columns:1fr 1fr;margin-top:14px">'
+    + '<button id="btnRecCopy">진단용 복사</button>'
+    + '<button id="btnRecListClose" class="primary">닫기</button></div></div>';
+  overlay.querySelectorAll('.rec-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      overlay.className = 'hidden'; overlay.innerHTML = '';
+      enterReplay(games[parseInt(btn.dataset.i, 10)]);
+    });
+  });
+  document.getElementById('btnRecCopy').addEventListener('click', copyGameRecord);
+  document.getElementById('btnRecListClose').addEventListener('click', () => {
+    overlay.className = 'hidden'; overlay.innerHTML = '';
+  });
+}
+
+// 복기 시작: 저장된 기보를 바둑판에 펼친다 (마지막 장면부터)
+function enterReplay(game) {
+  clearTimeout(aiTimer);
+  aiThinking = false;
+  replayMode = true;
+  replayMoves = game.moves.slice();
+  replayIndex = replayMoves.length;
+  gameOver = true;
+  fixing = false;
+  setupMode = false;
+  setupReady = false;
+  deadStones = new Set();
+  territoryMarks = [];
+  hintMarks = [];
+  document.getElementById('setupBar').classList.remove('placing');
+  document.getElementById('btnSetupMode').textContent = '판 놓아보기';
+  updateSetupPalette();
+  document.getElementById('replayControls').classList.remove('hidden');
+  renderReplay();
+}
+
+// 복기 종료 → 초기 화면으로
+function exitReplay() {
+  replayMode = false;
+  replayMoves = [];
+  replayIndex = 0;
+  document.getElementById('replayControls').classList.add('hidden');
+  goHome();
+}
+
+// 특정 색의 돌 개수 세기 (복기 중 따낸 돌 계산용)
+function countColor(b, color) {
+  let n = 0;
+  for (const row of b) for (const c of row) if (c === color) n++;
+  return n;
+}
+
+// 복기: 빈 판에서 replayIndex수까지 다시 둬서 현재 장면을 만든다
+function renderReplay() {
+  board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+  captures = { [BLACK]: 0, [WHITE]: 0 };
+  lastMove = null;
+  for (let i = 0; i < replayIndex; i++) {
+    const c = replayMoves[i][0], mv = replayMoves[i][1];
+    if (!mv || String(mv).toLowerCase() === 'pass') { lastMove = null; continue; }
+    const p = fromGtp(mv);
+    const color = (c === 'b') ? BLACK : WHITE;
+    const enemy = (color === BLACK) ? WHITE : BLACK;
+    const before = countColor(board, enemy);
+    if (!tryPlayFast(board, p.x, p.y, color, null)) {
+      board[p.y][p.x] = color;   // 놓아보기 배치 등 예외 상황은 그대로 놓음
+    }
+    captures[color] += Math.max(0, before - countColor(board, enemy));
+    lastMove = { x: p.x, y: p.y };
+  }
+  renderStones();
+}
+
+// ◀ ▶ 한 수 이동
+function replayStep(delta) {
+  if (!replayMode) return;
+  const next = Math.min(replayMoves.length, Math.max(0, replayIndex + delta));
+  if (next === replayIndex) return;
+  replayIndex = next;
+  renderReplay();
+  if (delta > 0) playStoneSound(false);   // 앞으로 갈 때만 착수음
 }
 
 /* ============================================================
@@ -1260,6 +1430,7 @@ function calculateScore() {
 function showResult(r) {
   const diff = Math.abs(r.scoreBlack - r.scoreWhite);
   const winner = r.scoreBlack > r.scoreWhite ? '흑' : '백';
+  saveGameToLocal(winner + ' ' + diff + '집 승');   // 기보 자동 저장
   const overlay = document.getElementById('resultOverlay');
   overlay.className = 'result-overlay';
   overlay.innerHTML = `
@@ -1396,6 +1567,11 @@ function newGame() {
   aiThinking = false;
   aiLowStreak = 0;
   hintUsedThisGame = false;   // 힌트 사용 여부 초기화
+  gameSavedOnce = false;      // 새 대국은 새 기보로 저장
+  replayMode = false;         // 복기 상태 해제
+  replayMoves = [];
+  replayIndex = 0;
+  { const rc = document.getElementById('replayControls'); if (rc) rc.classList.add('hidden'); }
   setupMode = false;          // 배치/놓아보기 상태 완전 초기화
   setupReady = false;
   lastSetupStone = null;
@@ -1690,6 +1866,7 @@ function aiResign() {
   gameOver = true;
   renderStones();
   const winner = aiColor === BLACK ? '백' : '흑';
+  saveGameToLocal(winner + ' 불계승');   // 기보 자동 저장
   const overlay = document.getElementById('resultOverlay');
   overlay.className = 'result-overlay';
   overlay.innerHTML = '<div class="result-card"><h2><span>' + winner + '</span> 불계승</h2>'
@@ -1820,7 +1997,10 @@ document.getElementById('btnSetupMode').addEventListener('click', toggleSetupMod
 document.getElementById('palBlack').addEventListener('click', () => onStoneButton(BLACK));
 document.getElementById('palWhite').addEventListener('click', () => onStoneButton(WHITE));
 document.getElementById('btnScoreReq').addEventListener('click', requestScoring);
-document.getElementById('btnCopyRec').addEventListener('click', copyGameRecord);
+document.getElementById('btnCopyRec').addEventListener('click', showRecordList);
+document.getElementById('btnRpPrev').addEventListener('click', () => replayStep(-1));
+document.getElementById('btnRpNext').addEventListener('click', () => replayStep(1));
+document.getElementById('btnRpClose').addEventListener('click', exitReplay);
 document.getElementById('btnNew').addEventListener('click', goHome);
 document.getElementById('btnSettings').addEventListener('click', () => { showSetup(); });
 function goToBoard() {
